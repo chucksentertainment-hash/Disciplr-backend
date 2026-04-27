@@ -38,7 +38,7 @@ export interface TestHarness {
  * Validates the database URL to ensure we are not accidentally connecting to production.
  * @param url Database URL to validate
  */
-function validateDatabaseUrl(url: string) {
+export function validateDatabaseUrl(url: string) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('SECURITY GUARD: Test harness cannot be run in production environment!');
   }
