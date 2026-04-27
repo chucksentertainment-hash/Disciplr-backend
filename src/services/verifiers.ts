@@ -1,7 +1,7 @@
 import { createAuditLog, AuditLog } from '../lib/audit-logs.js'
 import { db } from '../db/knex.js'
 
-export type VerifierStatus = 'pending' | 'approved' | 'suspended'
+export type VerifierStatus = 'pending' | 'approved' | 'suspended' | 'deactivated'
 export type VerificationResult = 'approved' | 'rejected'
 
 export class VerificationConflictError extends Error {
@@ -89,14 +89,11 @@ export const createVerifierProfile = async (
 
 export const createOrGetVerifierProfile = async (
   userId: string,
-  opts?: { displayName?: string; metadata?: Record<string, unknown> },
+  opts: { displayName?: string; metadata?: Record<string, unknown> } | undefined,
+  context: VerifierMutationContext,
 ) => {
   const existing = await db('verifiers').where({ user_id: userId }).first()
   if (existing) return mapVerifierRow(existing)
-
-  if (!context) {
-    throw new Error('Verifier creation requires audit context')
-  }
 
   return (await createVerifierProfile(userId, opts, context)).after
 }

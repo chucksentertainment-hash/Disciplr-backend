@@ -47,13 +47,10 @@ beforeAll(async () => {
         verifier: async () => `Bearer ${await authModule.signToken({ userId: '1', role: UserRole.VERIFIER })}`,
         admin: async () => `Bearer ${await authModule.signToken({ userId: '1', role: UserRole.ADMIN })}`,
     }
-    
-    const allowedRoles = [UserRole.ADMIN]
-    const isAuthorized = allowedRoles.includes(jwtRole)
-    
-    expect(isAuthorized).toBe(false)
-    // Even with multiple headers, JWT role should be used
-    expect(Object.keys(maliciousHeaders).length).toBeGreaterThan(1)
+  })
+
+  beforeEach(() => {
+    mockGetVerifierProfile.mockReset()
   })
 
   it('role determination is based on JWT payload only', () => {
@@ -97,13 +94,8 @@ beforeAll(async () => {
     const roleSource = trustedSource
     expect(roleSource).toBe('JWT')
   })
-})
 
-beforeEach(() => {
-     mockGetVerifierProfile.mockReset()
-})
-
-describe('authenticate', () => {
+  describe('authenticate', () => {
      it('rejects request with no token', async () => {
           const res = await request(app).get('/user-route')
           expect(res.status).toBe(401)
@@ -118,7 +110,7 @@ describe('authenticate', () => {
           const res = await request(app).get('/user-route').set('Authorization', await tokenHelpers.user())
           expect(res.status).toBe(200)
      })
-})
+  })
 
 describe('RBAC: Error Response Consistency', () => {
   /**

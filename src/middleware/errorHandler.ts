@@ -81,6 +81,10 @@ export class AppError extends Error {
   static internal(message = 'Internal server error') {
     return new AppError(500, ErrorCode.INTERNAL_ERROR, message)
   }
+
+  static unprocessable(message: string) {
+    return new AppError(422, ErrorCode.UNPROCESSABLE, message)
+  }
 }
 
 // ─── Express error-handler middleware ────────────────────────────────────────

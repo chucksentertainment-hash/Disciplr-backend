@@ -1,4 +1,5 @@
 import knex, { Knex } from 'knex'
+import { PrismaClient } from '@prisma/client'
 import { UserRole } from '../../types/user.js'
 
 /**
@@ -28,41 +29,145 @@ export interface TestUser {
   createdAt?: Date
 }
 
+export interface TestHarness {
+  knex: Knex
+  prisma: PrismaClient
+}
+
+/**
+ * Validates the database URL to ensure we are not accidentally connecting to production.
+ * @param url Database URL to validate
+ */
+export function validateDatabaseUrl(url: string) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SECURITY GUARD: Test harness cannot be run in production environment!');
+  }
+  
+  if (url) {
+    const isLocalhost = url.includes('localhost') || url.includes('127.0.0.1');
+    const isTestDb = url.includes('test') || url.includes('disciplr_test');
+    
+    if (!isLocalhost && !isTestDb) {
+      throw new Error(`SECURITY GUARD: Database URL looks like a production database. Refusing to run tests. URL: ${url}`);
+    }
+  }
+}
+
+/**
+ * Check if the database is reachable
+ * Useful for skipping integration tests in environments without a live database
+ * 
+ * @returns true if database is reachable, false otherwise
+ */
+export async function isDatabaseReachable(): Promise<boolean> {
+  const dbUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/disciplr_test'
+  
+  const db = knex({
+    client: 'pg',
+    connection: dbUrl,
+    acquireConnectionTimeout: 2000
+  })
+
+  try {
+    await db.raw('SELECT 1')
+    await db.destroy()
+    return true
+  } catch {
+    await db.destroy().catch(() => {})
+    return false
+  }
+}
+
 /**
  * Setup a test database connection and prepare it for testing
  * - Connects to the test database
  * - Runs all migrations
  * - Cleans all tables
  * 
- * @returns Knex database instance
+ * @returns Object with Knex and Prisma database instances
  */
-export async function setupTestDatabase(): Promise<Knex> {
+export async function setupTestDatabase(): Promise<TestHarness> {
+  const dbUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/disciplr_test'
+  
+  validateDatabaseUrl(dbUrl)
+
   const db = knex({
     client: 'pg',
-    connection: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/disciplr_test',
+    connection: dbUrl,
     migrations: {
       directory: './db/migrations',
       extension: 'cjs'
     }
   })
 
+  const prisma = new PrismaClient({
+    datasources: {
+      db: { url: dbUrl }
+    }
+  })
+
   // Run migrations to ensure schema is up to date
-  await db.migrate.latest()
+  await migrateUp(db)
 
   // Clean all tables to ensure a fresh state
-  await cleanAllTables(db)
+  await truncateTables(db)
 
-  return db
+  return { knex: db, prisma }
 }
 
 /**
  * Teardown the test database connection
  * - Destroys the database connection pool
  * 
+ * @param harness - TestHarness or Knex database instance
+ */
+export async function teardownTestDatabase(harness: TestHarness | Knex | undefined | null): Promise<void> {
+  if (!harness) return
+  if ('knex' in harness) {
+    await harness.knex.destroy()
+    await harness.prisma.$disconnect()
+  } else {
+    await (harness as Knex).destroy()
+  }
+}
+
+/**
+ * Apply database migrations (up)
+ */
+export async function migrateUp(db: Knex): Promise<void> {
+  await db.migrate.latest()
+}
+
+/**
+ * Rollback database migrations (down)
+ */
+export async function migrateDown(db: Knex): Promise<void> {
+  await db.migrate.rollback()
+}
+
+/**
+ * Truncate all tables in the database safely using CASCADE
+ * This is faster and less error-prone than deleting rows in order
+ * 
  * @param db - Knex database instance
  */
-export async function teardownTestDatabase(db: Knex): Promise<void> {
-  await db.destroy()
+export async function truncateTables(db: Knex): Promise<void> {
+  await db.raw(`
+    DO $$ DECLARE
+      r RECORD;
+    BEGIN
+      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename != 'knex_migrations' AND tablename != 'knex_migrations_lock') LOOP
+        EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE';
+      END LOOP;
+    END $$;
+  `);
+}
+
+/**
+ * Seed minimal test fixtures useful for general DB tests
+ */
+export async function seedMinimalFixtures(harness: TestHarness): Promise<void> {
+  await createAllRoleTestUsers(harness.knex)
 }
 
 /**

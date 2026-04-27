@@ -1,46 +1,268 @@
-# API Query Patterns
+# API Patterns Documentation
 
-This document outlines the standard patterns for querying the Disciplr API, including filtering, sorting, and pagination.
+This document describes the consistent patterns used across the Disciplr API, including list endpoint contracts, pagination strategies, and query parameter handling.
 
-## Safe Querying
+## List Endpoint Contract
 
-The API uses a hardened query parser to prevent SQL injection, prototype pollution, and unauthorized field access.
+All list endpoints in the API share a consistent query contract for pagination, sorting, and filtering.
 
-### Filtering
+### Endpoints Covered
 
-Filters are passed via the `filter` query parameter. Only allowlisted fields can be used for filtering.
+- `GET /api/vaults` - List vaults with offset pagination
+- `GET /api/transactions` - List transactions with cursor pagination
+- `GET /api/transactions/vault/:vaultId` - List vault transactions with cursor pagination
+- `GET /api/analytics/milestones/trends` - Analytics with date range filtering
+- `GET /api/organizations/:orgId/vaults` - Org-scoped vault lists
 
-**Basic equality:**
-`GET /api/vaults?filter[status]=active`
+### Common Query Parameters
 
-**Using operators:**
-`GET /api/vaults?filter[amount][gt]=1000&filter[amount][lt]=5000`
+#### Pagination
 
-Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `nin`.
+**Offset Pagination** (used by `/api/vaults`):
 
-### Sorting
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | integer | 1 | Page number (1-indexed) |
+| `pageSize` | integer | 20 | Items per page (max 100) |
 
-Sorting is handled via the `sort` parameter.
+**Cursor Pagination** (used by `/api/transactions`):
 
-**Single field:**
-`GET /api/vaults?sort=created_at:desc`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `cursor` | string | - | Opaque cursor for next page |
+| `limit` | integer | 20 | Items per page (max 100) |
 
-**Multiple fields:**
-`GET /api/vaults?sort=status:asc&sort=created_at:desc`
+#### Sorting
 
-### Pagination
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sortBy` | string | - | Field to sort by (endpoint-specific) |
+| `sortOrder` | string | `asc` | Sort direction: `asc` or `desc` |
 
-The API supports both page-based and cursor-based pagination.
+**Valid sort fields by endpoint:**
 
-**Page-based:**
-`GET /api/vaults?page=2&pageSize=20`
+- `/api/vaults`: `createdAt`, `amount`, `endTimestamp`, `status`
+- `/api/transactions`: `created_at`, `stellar_timestamp`, `amount`, `type`, `stellar_ledger`
+- `/api/transactions/vault/:vaultId`: `created_at`, `stellar_timestamp`, `amount`, `type`
 
-**Cursor-based:**
-`GET /api/vaults?limit=10&cursor=YTIwMjQtMDEtMDFUMDA6MDA6MDAuMDAwWnx2YXVsdF8xMjM=`
+#### Filtering
 
-## Security Protections
+Filter parameters are endpoint-specific. Invalid filter parameters are silently ignored.
 
-1. **Prototype Pollution:** Dangerous keys such as `__proto__`, `constructor`, and `prototype` are automatically stripped from all query parameters.
-2. **Explicit Allowlist:** Only fields explicitly allowed in the controller/service configuration can be used for filtering or sorting.
-3. **Nested Access Prevention:** Arbitrary nested object path traversal (e.g., `filter[user.password_hash]=...`) is blocked unless the specific path is in the allowlist.
-4. **Type Safety:** Filter values are sanitized and validated to ensure they match expected types (strings, numbers, or arrays of primitives).
+**Vaults filtering:**
+- `status` - Filter by vault status (active, completed, cancelled)
+- `creator` - Filter by creator address
+
+**Transactions filtering:**
+- `type` - Filter by transaction type
+- `vault_id` - Filter by vault ID
+- `date_from` - Filter by start date (ISO 8601)
+- `date_to` - Filter by end date (ISO 8601)
+- `amount_min` - Filter by minimum amount
+- `amount_max` - Filter by maximum amount
+
+### Response Format
+
+#### Offset Pagination Response
+
+```json
+{
+  "data": [...],
+  "pagination": {
+    "page": 1,
+    "pageSize": 20,
+    "total": 150,
+    "totalPages": 8,
+    "hasNext": true,
+    "hasPrev": false
+  }
+}
+```
+
+#### Cursor Pagination Response
+
+```json
+{
+  "data": [...],
+  "pagination": {
+    "limit": 20,
+    "cursor": "eyJ0aW1lc3RhbXAiOiIyMDI1LTAxLTAxVDAwOjAwOjAwLjAwMFoiLCJpZCI6InR4LTEyMyJ9",
+    "next_cursor": "eyJ0aW1lc3RhbXAiOiIyMDI1LTAxLTAxVDAwOjAwOjAwLjAwMFoiLCJpZCI6InR4LTEyNCJ9",
+    "has_more": true,
+    "count": 20
+  }
+}
+```
+
+### Error Responses
+
+Invalid query parameters return 400 with details:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid sort field. Allowed fields: created_at, stellar_timestamp, amount, type, stellar_ledger"
+  }
+}
+```
+
+Invalid cursor returns:
+
+```json
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Invalid cursor"
+  }
+}
+```
+
+## Analytics-Specific Patterns
+
+Analytics endpoints use date range filtering and grouping rather than standard pagination.
+
+### Date Range Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | ISO 8601 datetime | Yes | Start of date range |
+| `to` | ISO 8601 datetime | Yes | End of date range |
+| `groupBy` | string | No | Grouping: `day` or `week` (default: `day`) |
+
+### Example Request
+
+```
+GET /api/analytics/milestones/trends?from=2025-01-01T00:00:00.000Z&to=2025-01-31T23:59:59.999Z&groupBy=week
+```
+
+### Response Format
+
+```json
+{
+  "buckets": [
+    {
+      "bucketStart": "2025-01-01T00:00:00.000Z",
+      "bucketEnd": "2025-01-07T23:59:59.999Z",
+      "total": 10,
+      "successes": 7,
+      "failures": 3
+    }
+  ]
+}
+```
+
+## Security Considerations
+
+### Tenant Isolation
+
+All list endpoints enforce tenant isolation:
+- Vaults are filtered by authenticated user
+- Transactions are filtered by user_id
+- Analytics only return data for the specified userId parameter
+
+### Field Filtering
+
+- Sort fields are whitelisted per endpoint
+- Attempting to sort by non-allowed fields returns 400
+- Internal fields (user_id, org_id, etc.) are never exposed as sort options
+
+### Authentication
+
+All list endpoints require authentication:
+- Most use JWT Bearer tokens
+- Analytics endpoints accept API keys via `x-api-key` header
+
+## Usage Examples
+
+### Paginating Through Vaults
+
+```bash
+# Get first page
+curl -H "Authorization: Bearer $TOKEN" \
+  "/api/vaults?page=1&pageSize=10"
+
+# Get next page
+curl -H "Authorization: Bearer $TOKEN" \
+  "/api/vaults?page=2&pageSize=10"
+```
+
+### Sorting Transactions
+
+```bash
+# Newest transactions first
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?sortBy=stellar_timestamp&sortOrder=desc"
+
+# Sort by amount ascending
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?sortBy=amount&sortOrder=asc"
+```
+
+### Filtering with Multiple Criteria
+
+```bash
+# Filter by type and vault
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?type=creation&vault_id=$VAULT_ID"
+
+# Date range filter
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?date_from=2025-01-01T00:00:00.000Z&date_to=2025-01-31T23:59:59.999Z"
+```
+
+### Cursor-Based Pagination
+
+```bash
+# Initial request
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?limit=5"
+
+# Follow-up using cursor from response
+curl -H "x-user-id: $USER_ID" \
+  "/api/transactions?limit=5&cursor=$NEXT_CURSOR"
+```
+
+### Analytics Date Range
+
+```bash
+# Weekly trends for a month
+curl -H "x-api-key: $API_KEY" \
+  "/api/analytics/milestones/trends?from=2025-01-01T00:00:00.000Z&to=2025-01-31T23:59:59.999Z&groupBy=week"
+
+# Daily behavior score
+curl -H "x-api-key: $API_KEY" \
+  "/api/analytics/behavior?userId=user-123&from=2025-01-01T00:00:00.000Z&to=2025-01-07T23:59:59.999Z"
+```
+
+## Implementation Details
+
+### Query Parser Middleware
+
+The `queryParser` middleware in `src/middleware/queryParser.ts` handles validation:
+
+```typescript
+queryParser({
+  allowedSortFields: ['created_at', 'stellar_timestamp', 'amount', 'type'],
+  allowedFilterFields: ['type', 'vault_id', 'date_from', 'date_to']
+})
+```
+
+### Pagination Utilities
+
+Pagination is handled by utilities in `src/utils/pagination.ts`:
+
+- `parsePaginationParams()` - Offset pagination
+- `parseCursorPaginationParams()` - Cursor pagination
+- `parseSortParams()` - Sort validation
+- `parseFilterParams()` - Filter extraction
+
+### Contract Testing
+
+All list endpoints have contract tests in their respective test files:
+
+- `src/routes/vaults.test.ts` - Vault list contract tests
+- `src/routes/transactions.test.ts` - Transaction list contract tests
+- `src/routes/analytics.milestones.test.ts` - Analytics contract tests
+
+The reusable contract test helper is at `src/tests/helpers/listContract.ts`.

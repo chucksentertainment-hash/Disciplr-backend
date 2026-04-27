@@ -1,14 +1,10 @@
-import { Router, Request, Response } from "express";
-import { AuthService } from "../services/auth.service.js";
-import {
-  formatValidationError,
-  loginSchema,
-  refreshSchema,
-  registerSchema,
-} from "../lib/validation.js";
-import { createAuditLog } from "../lib/audit-logs.js";
-import { authenticate } from "../middleware/auth.js";
-import { revokeSession, revokeAllUserSessions } from "../services/session.js";
+import { Router, Request, Response, NextFunction } from 'express'
+import { AuthService } from '../services/auth.service.js'
+import { registerSchema, loginSchema, refreshSchema } from '../lib/validation.js'
+import { createAuditLog } from '../lib/audit-logs.js'
+import { authenticate } from '../middleware/auth.js'
+import { revokeSession, revokeAllUserSessions } from '../services/session.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 export const authRouter = Router();
 
@@ -44,25 +40,24 @@ const upsertMockUser = (userId: string): MockUser => {
 
 // ------------- Endpoints -------------
 
-authRouter.post("/register", async (req, res) => {
-  const result = registerSchema.safeParse(req.body);
-  if (!result.success) {
-    res.status(400).json(formatValidationError(result.error));
-    return;
-  }
+authRouter.post('/register', async (req, res, next) => {
+    const result = registerSchema.safeParse(req.body)
+    if (!result.success) {
+        return next(AppError.validation('Validation failed', result.error.format()))
+    }
 
-  try {
-    const user = await AuthService.register(result.data);
-    res.status(201).json(user);
-  } catch (error: any) {
-    res.status(400).json({ error: error.message });
-  }
-});
+    try {
+        const user = await AuthService.register(result.data)
+        res.status(201).json(user)
+    } catch (error: any) {
+        return next(AppError.badRequest(error.message))
+    }
+})
 
-authRouter.post("/login", async (req, res) => {
-  // Support mock login if only userId is provided (from audit-logs feature branch)
-  if (req.body.userId && !req.body.email && !req.body.password) {
-    const { userId } = req.body as { userId: string };
+authRouter.post('/login', async (req, res, next) => {
+    // Support mock login if only userId is provided (from audit-logs feature branch)
+    if (req.body.userId && !req.body.email && !req.body.password) {
+        const { userId } = req.body as { userId: string }
 
     const now = new Date().toISOString();
     const user = upsertMockUser(userId);
@@ -87,35 +82,33 @@ authRouter.post("/login", async (req, res) => {
     return;
   }
 
-  // Real login flow
-  const result = loginSchema.safeParse(req.body);
-  if (!result.success) {
-    res.status(400).json(formatValidationError(result.error));
-    return;
-  }
+    // Real login flow
+    const result = loginSchema.safeParse(req.body)
+    if (!result.success) {
+        return next(AppError.validation('Validation failed', result.error.format()))
+    }
 
-  try {
-    const data = await AuthService.login(result.data);
-    res.json(data);
-  } catch (error: any) {
-    res.status(401).json({ error: error.message });
-  }
-});
+    try {
+        const data = await AuthService.login(result.data)
+        res.json(data)
+    } catch (error: any) {
+        return next(AppError.unauthorized(error.message))
+    }
+})
 
-authRouter.post("/refresh", async (req, res) => {
-  const result = refreshSchema.safeParse(req.body);
-  if (!result.success) {
-    res.status(400).json(formatValidationError(result.error));
-    return;
-  }
+authRouter.post('/refresh', async (req, res, next) => {
+    const result = refreshSchema.safeParse(req.body)
+    if (!result.success) {
+        return next(AppError.validation('Validation failed', result.error.format()))
+    }
 
-  try {
-    const data = await AuthService.refresh(result.data.refreshToken);
-    res.json(data);
-  } catch (error: any) {
-    res.status(401).json({ error: error.message });
-  }
-});
+    try {
+        const data = await AuthService.refresh(result.data.refreshToken)
+        res.json(data)
+    } catch (error: any) {
+        return next(AppError.unauthorized(error.message))
+    }
+})
 
 authRouter.post(
   "/logout",
@@ -141,41 +134,32 @@ authRouter.post(
   },
 );
 
-authRouter.post(
-  "/logout-all",
-  authenticate,
-  async (req: Request, res: Response) => {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+authRouter.post('/logout-all', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  const userId = req.user?.userId
+  if (!userId) {
+    return next(AppError.unauthorized('Unauthorized'))
+  }
 
     await revokeAllUserSessions(userId);
     res.json({ message: "Successfully logged out from all devices" });
   },
 );
 
-authRouter.post("/users/:id/role", (req, res) => {
-  const actorRole = req.header("x-user-role");
-  const actorId = req.header("x-user-id");
+authRouter.post('/users/:id/role', (req, res, next) => {
+  const actorRole = req.header('x-user-role')
+  const actorId = req.header('x-user-id')
 
-  if (actorRole !== "admin") {
-    res.status(403).json({ error: "Only admin users can change roles" });
-    return;
+  if (actorRole !== 'admin') {
+    return next(AppError.forbidden('Only admin users can change roles'))
   }
 
   if (!actorId) {
-    res.status(400).json({ error: "Missing x-user-id header" });
-    return;
+    return next(AppError.badRequest('Missing x-user-id header'))
   }
 
   const { role } = req.body as { role?: string };
   if (!role || !supportedRoles.includes(role as UserRole)) {
-    res
-      .status(400)
-      .json({ error: "Invalid role. Supported roles: user, verifier, admin" });
-    return;
+    return next(AppError.validation('Invalid role. Supported roles: user, verifier, admin'))
   }
 
   const user = upsertMockUser(req.params.id);

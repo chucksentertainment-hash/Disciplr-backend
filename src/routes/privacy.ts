@@ -1,7 +1,8 @@
-import { Router, Request, Response } from 'express'
+import { Router, Request, Response, NextFunction } from 'express'
 import { utcNow } from '../utils/timestamps.js'
 import { prisma } from '../lib/prisma.js'
 import { authenticate } from '../middleware/auth.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 export const privacyRouter = Router()
 
@@ -9,12 +10,11 @@ export const privacyRouter = Router()
  * GET /api/privacy/export?creator=<USER_ID>
  * Exports all data related to a specific creator.
  */
-privacyRouter.get('/export', authenticate, async (req: Request, res: Response) => {
+privacyRouter.get('/export', authenticate, async (req: Request, res: Response, next: NextFunction) => {
     const creator = req.query.creator as string
 
     if (!creator) {
-        res.status(400).json({ error: 'Missing required query parameter: creator' })
-        return
+        return next(AppError.badRequest('Missing required query parameter: creator'))
     }
 
     try {
@@ -35,7 +35,7 @@ privacyRouter.get('/export', authenticate, async (req: Request, res: Response) =
             },
         })
     } catch (error: any) {
-        res.status(500).json({ error: error.message })
+        return next(AppError.internal(error.message))
     }
 })
 
@@ -43,12 +43,11 @@ privacyRouter.get('/export', authenticate, async (req: Request, res: Response) =
  * DELETE /api/privacy/account?creator=<USER_ID>
  * Deletes all records associated with a specific creator.
  */
-privacyRouter.delete('/account', authenticate, async (req: Request, res: Response) => {
+privacyRouter.delete('/account', authenticate, async (req: Request, res: Response, next: NextFunction) => {
     const creator = creatorIdFromQuery(req)
 
     if (!creator) {
-        res.status(400).json({ error: 'Missing required query parameter: creator' })
-        return
+        return next(AppError.badRequest('Missing required query parameter: creator'))
     }
 
     try {
@@ -57,8 +56,7 @@ privacyRouter.delete('/account', authenticate, async (req: Request, res: Respons
         })
 
         if (deleteResult.count === 0) {
-            res.status(404).json({ error: 'No data found for this creator' })
-            return
+            return next(AppError.notFound('No data found for this creator'))
         }
 
         res.json({
@@ -67,7 +65,7 @@ privacyRouter.delete('/account', authenticate, async (req: Request, res: Respons
             status: 'success'
         })
     } catch (error: any) {
-        res.status(500).json({ error: error.message })
+        return next(AppError.internal(error.message))
     }
 })
 

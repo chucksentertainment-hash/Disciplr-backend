@@ -55,8 +55,26 @@ export const requireVerifier = enforceRBAC({
 
 export const requireAdmin = enforceRBAC({
   allow: [UserRole.ADMIN],
-});
+})
 
-export const requireVerifier = enforceRBAC({
-  allow: [UserRole.VERIFIER, UserRole.ADMIN],
-});
+// Middleware to check if verifier has an active profile
+export const requireActiveVerifier = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  if (!req.user || req.user.role !== UserRole.VERIFIER) {
+    logRBACDenied(req, "not_verifier");
+    res.status(403).json({ error: "Forbidden", message: "Requires active verifier role" });
+    return;
+  }
+  
+  try {
+    const profile = await getVerifierProfile(req.user.userId);
+    if (!profile || !profile.isActive) {
+      logRBACDenied(req, "verifier_not_active");
+      res.status(403).json({ error: "Forbidden", message: "Verifier account is not active" });
+      return;
+    }
+    next();
+  } catch (error) {
+    logRBACDenied(req, "verifier_profile_error");
+    res.status(500).json({ error: "Internal server error" });
+  }
+};

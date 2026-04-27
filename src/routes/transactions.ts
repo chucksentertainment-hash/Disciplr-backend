@@ -1,7 +1,8 @@
-import { Router, Request, Response } from 'express'
+import { Router, Request, Response, NextFunction } from 'express'
 import { queryParser } from '../middleware/queryParser.js'
 import { db } from '../db/index.js'
 import { requireUserAuth } from '../middleware/userAuth.js'
+import { AppError } from '../middleware/errorHandler.js'
 import { TransactionRepository } from '../repositories/transactionRepository.js'
 
 export const transactionsRouter = Router()
@@ -15,7 +16,7 @@ transactionsRouter.get(
     allowedSortFields: ['created_at', 'stellar_timestamp', 'amount', 'type', 'stellar_ledger'],
     allowedFilterFields: ['type', 'vault_id', 'date_from', 'date_to', 'amount_min', 'amount_max'],
   }),
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.authUser!.userId
       const limit = Math.min(100, req.cursorPagination?.limit || 20)
@@ -55,17 +56,16 @@ transactionsRouter.get(
       res.json(result)
     } catch (error: any) {
       if (error.message === 'Invalid cursor') {
-        res.status(400).json({ error: 'Invalid cursor' })
-        return
+        return next(AppError.badRequest('Invalid cursor'))
       }
       console.error('Error fetching transactions:', error)
-      res.status(500).json({ error: 'Internal server error' })
+      return next(AppError.internal('Internal server error'))
     }
   }
 )
 
 // GET /api/transactions/:id - Get specific transaction
-transactionsRouter.get('/:id', requireUserAuth, async (req: Request, res: Response) => {
+transactionsRouter.get('/:id', requireUserAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.authUser!.userId
     const transactionId = req.params.id
@@ -76,14 +76,13 @@ transactionsRouter.get('/:id', requireUserAuth, async (req: Request, res: Respon
       .first()
 
     if (!transaction) {
-      res.status(404).json({ error: 'Transaction not found' })
-      return
+      return next(AppError.notFound('Transaction not found'))
     }
 
     res.json(transaction)
   } catch (error) {
     console.error('Error fetching transaction:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    return next(AppError.internal('Internal server error'))
   }
 })
 
@@ -95,7 +94,7 @@ transactionsRouter.get(
     allowedSortFields: ['created_at', 'stellar_timestamp', 'amount', 'type'],
     allowedFilterFields: ['type', 'date_from', 'date_to', 'amount_min', 'amount_max'],
   }),
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.authUser!.userId
       const vaultId = req.params.vaultId
@@ -107,8 +106,7 @@ transactionsRouter.get(
         .first()
 
       if (!vault) {
-        res.status(404).json({ error: 'Vault not found' })
-        return
+        return next(AppError.notFound('Vault not found'))
       }
 
       const limit = Math.min(100, req.cursorPagination?.limit || 20)
@@ -127,11 +125,10 @@ transactionsRouter.get(
       res.json(result)
     } catch (error: any) {
       if (error.message === 'Invalid cursor') {
-        res.status(400).json({ error: 'Invalid cursor' })
-        return
+        return next(AppError.badRequest('Invalid cursor'))
       }
       console.error('Error fetching vault transactions:', error)
-      res.status(500).json({ error: 'Internal server error' })
+      return next(AppError.internal('Internal server error'))
     }
   }
 )

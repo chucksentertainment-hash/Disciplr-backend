@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from 'express'
+import { Router, Request, Response, NextFunction } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { queryParser } from '../middleware/queryParser.js'
 import type {
@@ -11,6 +11,7 @@ import {
   markAllAsRead,
   markAsRead,
 } from '../services/notification.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 const DEFAULT_SORT_BY: NotificationSortField = 'created_at'
 const DEFAULT_SORT_ORDER = 'desc' as const
@@ -25,16 +26,14 @@ notificationsRouter.get(
   queryParser({
     allowedSortFields: ['created_at', 'read_at', 'title', 'type'],
   }),
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) {
-      res.status(401).json({ error: 'Unauthenticated' })
-      return
+      return next(AppError.unauthorized('Unauthenticated'))
     }
 
     const rawStatus = String(req.query.status ?? 'all').toLowerCase() as NotificationReadStatus
     if (!ALLOWED_STATUSES.includes(rawStatus)) {
-      res.status(400).json({ error: 'Invalid status filter. Use all, read, or unread.' })
-      return
+      return next(AppError.badRequest('Invalid status filter. Use all, read, or unread.'))
     }
 
     const includeArchived = ['true', '1'].includes(String(req.query.includeArchived ?? '').toLowerCase())
@@ -52,43 +51,38 @@ notificationsRouter.get(
   },
 )
 
-notificationsRouter.patch('/:id/read', async (req: Request, res: Response) => {
+notificationsRouter.patch('/:id/read', async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) {
-    res.status(401).json({ error: 'Unauthenticated' })
-    return
+    return next(AppError.unauthorized('Unauthenticated'))
   }
 
   const notification = await markAsRead(req.params.id, req.user.userId)
 
   if (!notification) {
-    res.status(404).json({ error: 'Notification not found' })
-    return
+    return next(AppError.notFound('Notification not found'))
   }
 
   res.json(notification)
 })
 
-notificationsRouter.post('/read-all', async (req: Request, res: Response) => {
+notificationsRouter.post('/read-all', async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) {
-    res.status(401).json({ error: 'Unauthenticated' })
-    return
+    return next(AppError.unauthorized('Unauthenticated'))
   }
 
   const updated = await markAllAsRead(req.user.userId)
   res.json({ updated })
 })
 
-notificationsRouter.delete('/:id', async (req: Request, res: Response) => {
+notificationsRouter.delete('/:id', async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) {
-    res.status(401).json({ error: 'Unauthenticated' })
-    return
+    return next(AppError.unauthorized('Unauthenticated'))
   }
 
   const notification = await archiveNotification(req.params.id, req.user.userId)
 
   if (!notification) {
-    res.status(404).json({ error: 'Notification not found' })
-    return
+    return next(AppError.notFound('Notification not found'))
   }
 
   res.json({

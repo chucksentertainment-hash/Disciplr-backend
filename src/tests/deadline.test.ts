@@ -162,7 +162,7 @@ describe('deadline expiration correctness', () => {
     expect(notificationRows[0]).toMatchObject({
       user_id: vault.creator,
       type: 'vault_failure',
-      data: JSON.stringify({ vaultId: vault.id }),
+      data: { vaultId: vault.id },
     })
   })
 

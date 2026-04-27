@@ -54,39 +54,35 @@ export const envSchema = z
       .default("development"),
     PORT: positiveInt(3000),
     SERVICE_NAME: z.string().default("disciplr-backend"),
-    DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+    DATABASE_URL: z.string().min(1, "DATABASE_URL is required").refine(
+      (url) => url.startsWith('postgres://') || url.startsWith('postgresql://'),
+      'DATABASE_URL must be a valid PostgreSQL connection URL'
+    ),
 
-    // ── CORS ────────────────────────────────────────────
-    CORS_ORIGINS: z
-      .string()
-      .optional()
-      .refine(
-        (val) => {
-          if (val === undefined) return true;
-          if (val === "") return false;
-          if (val === "*") return true;
-          const origins = val
-            .split(",")
-            .map((o) => o.trim())
-            .filter(Boolean);
-          return origins.length > 0 && origins.every((o) => o !== "*");
-        },
-        {
-          message:
-            'CORS_ORIGINS must be "*" or a comma-separated list of origins (no "*" in list, cannot be empty)',
-        },
-      ),
 
     // ── Auth / secrets ──────────────────────────────────────────
-    JWT_SECRET: z.string().default("change-me-in-production"),
-    JWT_ACCESS_SECRET: z.string().default("fallback-access-secret"),
-    JWT_REFRESH_SECRET: z.string().default("fallback-refresh-secret"),
-    JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
-    JWT_REFRESH_EXPIRES_IN: z.string().default("7d"),
-    DOWNLOAD_SECRET: z.string().default("change-me-in-production"),
+    JWT_SECRET: z.string().min(16, "must be at least 16 characters").default("change-me-in-production-long-secret"),
+    JWT_ACCESS_SECRET: z.string().min(16, "must be at least 16 characters").default("fallback-access-secret-long"),
+    JWT_REFRESH_SECRET: z.string().min(16, "must be at least 16 characters").default("fallback-refresh-secret-long"),
+    JWT_ACCESS_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("15m"),
+    JWT_REFRESH_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("7d"),
+    DOWNLOAD_SECRET: z.string().min(16, "must be at least 16 characters").default("change-me-in-production-long-secret"),
 
     // ── Horizon / Stellar ───────────────────────────────────────
-    HORIZON_URL: z.string().optional(),
+    HORIZON_URL: z.string().optional().refine(
+      (url) => !url || url.startsWith('http://') || url.startsWith('https://'),
+      'HORIZON_URL must be a valid HTTP or HTTPS URL'
+    ),
+    CORS_ORIGINS: z.string().optional().refine(
+      (val) => {
+        if (val === undefined) return true
+        if (val === "") return false
+        if (val === '*') return true
+        const parts = val.split(',')
+        return parts.length > 0 && parts.every(p => p.trim().startsWith('http'))
+      },
+      'CORS_ORIGINS cannot be empty'
+    ),
     CONTRACT_ADDRESS: z.string().optional(),
     START_LEDGER: nonNegativeInt(0).optional(),
     RETRY_MAX_ATTEMPTS: nonNegativeInt(3),
@@ -125,6 +121,11 @@ export const envSchema = z
     // ── Deadline / Analytics schedulers ─────────────────────────
     DEADLINE_CHECK_INTERVAL_MS: positiveInt(60_000),
     ANALYTICS_RECOMPUTE_INTERVAL_MS: positiveInt(300_000),
+
+    // ── Misc / Limits ───────────────────────────────────────────
+    MAX_JSON_BODY_SIZE: z.string().default('500kb'),
+    HORIZON_LAG_THRESHOLD: nonNegativeInt(10),
+    HORIZON_SHUTDOWN_TIMEOUT_MS: positiveInt(30_000),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === "production" && data.CORS_ORIGINS === "*") {
@@ -184,10 +185,10 @@ export function validateEnv(
   // can technically still start.
   if (validated.NODE_ENV === "production") {
     const insecureDefaults: Array<{ key: keyof Env; sentinel: string }> = [
-      { key: "JWT_SECRET", sentinel: "change-me-in-production" },
-      { key: "JWT_ACCESS_SECRET", sentinel: "fallback-access-secret" },
-      { key: "JWT_REFRESH_SECRET", sentinel: "fallback-refresh-secret" },
-      { key: "DOWNLOAD_SECRET", sentinel: "change-me-in-production" },
+      { key: "JWT_SECRET", sentinel: "change-me-in-production-long-secret" },
+      { key: "JWT_ACCESS_SECRET", sentinel: "fallback-access-secret-long" },
+      { key: "JWT_REFRESH_SECRET", sentinel: "fallback-refresh-secret-long" },
+      { key: "DOWNLOAD_SECRET", sentinel: "change-me-in-production-long-secret" },
     ];
 
     for (const { key, sentinel } of insecureDefaults) {

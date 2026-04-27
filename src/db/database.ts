@@ -5,9 +5,24 @@ import fs from 'fs'
 import { subDays, subYears } from 'date-fns'
 import { utcStartOfDay, utcEndOfDay } from '../utils/timestamps.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const dbPath = path.join(__dirname, '../../data/disciplr.db')
+/**
+ * MODULE SHIM: Handles ESM (Production) vs CommonJS (Jest/Testing) environments.
+ * This prevents the "Cannot use import.meta outside a module" error in Jest.
+ */
+let _filename: string;
+let _dirname: string;
+
+try {
+    // @ts-ignore - Ignore TS error during transpilation for test environments
+    _filename = fileURLToPath(import.meta.url);
+    _dirname = path.dirname(_filename);
+} catch (e) {
+    // Fallback to CommonJS globals provided by Jest
+    _filename = __filename;
+    _dirname = __dirname;
+}
+
+const dbPath = path.join(_dirname, '../../data/disciplr.db')
 
 // Ensure data directory exists
 const dataDir = path.dirname(dbPath)

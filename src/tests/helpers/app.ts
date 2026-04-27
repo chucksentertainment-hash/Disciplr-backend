@@ -10,7 +10,7 @@ import { type Knex } from 'knex'
  * @returns Object containing the app, jobSystem, and database connection
  */
 export async function initTestApp() {
-  const db = await setupTestDatabase()
+  const { knex: db } = await setupTestDatabase()
   const { app, jobSystem } = bootstrapApp()
   
   return { app, jobSystem, db }

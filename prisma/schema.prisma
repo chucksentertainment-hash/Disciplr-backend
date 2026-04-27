@@ -40,7 +40,6 @@ model User {
   vaults        Vault[]
   notifications Notification[]
   refreshTokens RefreshToken[]
-  transactions  Transaction[]
 
   @@index([deletedAt])
 }
@@ -68,7 +67,6 @@ model Vault {
   status             VaultStatus @default(DRAFT)
   createdAt          DateTime    @default(now()) @map("created_at")
   updatedAt          DateTime    @updatedAt @map("updated_at")
-  transactions       Transaction[]
 
   @@index([creatorId])
   @@index([status])
