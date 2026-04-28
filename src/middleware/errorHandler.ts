@@ -14,6 +14,8 @@ export const ErrorCode = {
   NOT_FOUND: 'NOT_FOUND',
   // 409
   CONFLICT: 'CONFLICT',
+  // 413
+  PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
   // 422
   UNPROCESSABLE: 'UNPROCESSABLE',
   // 429
@@ -79,6 +81,10 @@ export class AppError extends Error {
   static internal(message = 'Internal server error') {
     return new AppError(500, ErrorCode.INTERNAL_ERROR, message)
   }
+
+  static unprocessable(message: string) {
+    return new AppError(422, ErrorCode.UNPROCESSABLE, message)
+  }
 }
 
 // ─── Express error-handler middleware ────────────────────────────────────────
@@ -93,6 +99,11 @@ export const errorHandler = (
   // Structured log – no stack trace in the response, but captured here for ops.
   // PII is not logged: we only record method, path, and a sanitised message.
   const requestId = (req.headers['x-request-id'] as string | undefined) ?? undefined
+
+  // Sanitize and convert express body-parser size limit errors
+  if (err && typeof err === 'object' && 'status' in err && err.status === 413 && 'type' in err && (err as any).type === 'entity.too.large') {
+    err = new AppError(413, ErrorCode.PAYLOAD_TOO_LARGE, 'Payload too large')
+  }
 
   if (err instanceof AppError) {
     console.error(

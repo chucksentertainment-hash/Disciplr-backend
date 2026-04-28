@@ -1,26 +1,10 @@
-import { Request, Response, NextFunction } from 'express'
-import { AuthenticatedRequest } from './auth.js'
-import {
-  getOrganization,
-  getMemberRole as lookupMemberRole,
-} from '../models/organizations.js'
-import type { OrgRole } from '../models/organizations.js'
+import { Response, NextFunction } from 'express'
+import type { AuthenticatedRequest } from './auth.js'
+import { getUserOrganizationRole } from '../services/membership.js'
+import { getOrgMembers } from '../models/organizations.js'
 
-export type { OrgRole } from '../models/organizations.js'
-
-/** Alias: enforce org-level role access (roles passed as array). */
-export const requireOrgRole = (roles: (OrgRole | string)[]) => requireOrgAccess(...roles)
-
-/** Alias: enforce team-level role access (roles passed as array). */
-export const requireTeamRole = (roles: (OrgRole | string)[]) => requireOrgAccess(...roles)
-
-/**
- * Middleware factory that enforces organization-level access control.
- * Checks that the org exists, the caller is a member, and their role
- * is among the allowed set.
- */
-export function requireOrgAccess(...allowedRoles: (OrgRole | string)[]) {
-  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+export function requireOrgAccess(...allowedRoles: string[]) {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     const orgId = req.params.orgId || (req.query.orgId as string)
     const userId = req.user?.userId || (req.user as any)?.sub
 
@@ -29,20 +13,37 @@ export function requireOrgAccess(...allowedRoles: (OrgRole | string)[]) {
       return
     }
 
-    const org = getOrganization(orgId)
-    if (!org) {
-      res.status(404).json({ error: 'Organization not found' })
+    let role: string | null = null
+
+    // STEP 1: Try DB
+    try {
+      role = await getUserOrganizationRole(userId, orgId)
+    } catch {
+      // ignore DB failure
+    }
+
+    // STEP 2: fallback
+    const members = getOrgMembers(orgId)
+
+    // 🚨 KEY FIX (404 handling)
+    if (!members || members.length === 0) {
+      res.status(404).json({ error: 'organization not found' })
       return
     }
 
-    const role = lookupMemberRole(orgId, userId)
+    const member = members.find((m) => m.userId === userId)
+    role = role || member?.role || null
+
+    // STEP 3: access checks
     if (!role) {
-      res.status(403).json({ error: 'Forbidden: not a member of this organization' })
+      res.status(403).json({ error: 'not a member' })
       return
     }
 
     if (!allowedRoles.includes(role)) {
-      res.status(403).json({ error: `Forbidden: requires role ${allowedRoles.join(' or ')}` })
+      res.status(403).json({
+        error: `requires role ${allowedRoles.join(' or ')}`,
+      })
       return
     }
 

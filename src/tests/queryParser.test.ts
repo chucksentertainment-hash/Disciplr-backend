@@ -1,4 +1,4 @@
-import { QueryParser } from './queryParser';
+import { QueryParser } from '../services/queryParser.js';
 import { Knex } from 'knex';
 
 describe('QueryParser', () => {
@@ -79,6 +79,41 @@ describe('QueryParser', () => {
     const query = { filter: { status: { eq: { some: 'object' } } } };
     const result = parser.parse(query);
     expect(result.conditions[0].value).toBeNull();
+  });
+
+  test('should prevent prototype pollution via __proto__', () => {
+    // Note: In some JS environments, { __proto__: { polluted: true } } 
+    // actually pollutes the object literal.
+    const query = JSON.parse('{"filter": {"status": "active"}, "__proto__": {"polluted": true}}');
+    const result = parser.parse(query);
+    
+    expect(result).not.toHaveProperty('polluted');
+    expect((Object.prototype as any).polluted).toBeUndefined();
+  });
+
+  test('should ignore dangerous keys in filter', () => {
+    const query = {
+      filter: {
+        status: 'active',
+        '__proto__': { admin: true },
+        'constructor': { prototype: { admin: true } }
+      }
+    };
+    const result = parser.parse(query);
+    
+    expect(result.conditions).toHaveLength(1);
+    expect(result.conditions[0].column).toBe('status');
+  });
+
+  test('should reject nested property access in columns if not allowed', () => {
+    const query = { filter: { 'status.nested': 'value' } };
+    const result = parser.parse(query);
+    
+    expect(result.conditions).toHaveLength(0);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Restricted column access'),
+      expect.objectContaining({ column: 'status.nested' })
+    );
   });
 
   test('should handle IN operator with arrays', () => {

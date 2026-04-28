@@ -104,6 +104,13 @@ Get vault by ID. Tries database first, falls back to in-memory storage.
 
 Cancel a vault. Only the creator or an admin can cancel.
 
+**Body:**
+```json
+{
+  "reason": "Optional cancellation reason"
+}
+```
+
 **Response:** `200 OK`
 ```json
 {
@@ -111,6 +118,18 @@ Cancel a vault. Only the creator or an admin can cancel.
   "id": "uuid"
 }
 ```
+
+**Audit Logging:**
+This endpoint creates an audit log entry with:
+- Action: `vault.cancelled`
+- Target: `vault:{vault_id}`
+- Metadata:
+  - `previous_status`: Vault status before cancellation
+  - `new_status`: Always set to "cancelled"
+  - `reason`: Cancellation reason (or default "User requested cancellation")
+  - `cancelled_by`: "creator" or "admin"
+  - `creator`: Original vault creator
+  - `amount`: Vault amount
 
 ### GET /api/vaults/user/:address
 

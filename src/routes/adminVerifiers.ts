@@ -9,7 +9,8 @@ import {
   getVerifierProfile,
   getVerifierStats,
   listVerifierProfiles,
-  setVerifierStatus,
+  InvalidVerifierStatusTransitionError,
+  transitionVerifier,
   updateVerifierProfile,
 } from '../services/verifiers.js'
 
@@ -66,18 +67,15 @@ adminVerifiersRouter.post('/', async (req: Request, res: Response) => {
       displayName: typeof displayName === 'string' ? displayName.trim() : undefined,
       metadata: isRecord(metadata) ? metadata : undefined,
       status: isVerifierStatus(status) ? status : undefined,
-    })
+    }, { actorUserId: req.user!.userId })
 
-    const stats = await getVerifierStats(profile.userId)
-    console.info(JSON.stringify({ level: 'info', event: 'admin.verifier_profile.created', userIdPrefix: maskUserId(profile.userId) }))
-    res.status(201).json({ profile, stats })
+    const stats = await getVerifierStats(profile.after.userId)
+    res.status(201).json({ profile: profile.after, stats, auditLogId: profile.auditLog?.id })
   } catch (error) {
     if (isDuplicateError(error)) {
       res.status(409).json({ error: 'verifier already exists' })
       return
     }
-
-    console.error(JSON.stringify({ level: 'error', event: 'admin.verifier_profile.create_failed' }))
     res.status(500).json({ error: 'internal server error' })
   }
 })
@@ -105,11 +103,21 @@ adminVerifiersRouter.patch('/:userId', async (req: Request, res: Response) => {
     return
   }
 
-  const profile = await updateVerifierProfile(userId, {
-    displayName: typeof displayName === 'string' ? displayName.trim() : displayName === null ? null : undefined,
-    metadata: isRecord(metadata) ? metadata : metadata === null ? null : undefined,
-    status: isVerifierStatus(status) ? status : undefined,
-  })
+  let profile
+  try {
+    profile = await updateVerifierProfile(userId, {
+      displayName: typeof displayName === 'string' ? displayName.trim() : displayName === null ? null : undefined,
+      metadata: isRecord(metadata) ? metadata : metadata === null ? null : undefined,
+      status: isVerifierStatus(status) ? status : undefined,
+    }, { actorUserId: req.user!.userId })
+  } catch (error) {
+    if (error instanceof InvalidVerifierStatusTransitionError) {
+      res.status(409).json({ error: error.message })
+      return
+    }
+    res.status(500).json({ error: 'internal server error' })
+    return
+  }
 
   if (!profile) {
     res.status(404).json({ error: 'verifier not found' })
@@ -117,39 +125,39 @@ adminVerifiersRouter.patch('/:userId', async (req: Request, res: Response) => {
   }
 
   const stats = await getVerifierStats(userId)
-  console.info(JSON.stringify({ level: 'info', event: 'admin.verifier_profile.updated', userIdPrefix: maskUserId(userId) }))
-  res.json({ profile, stats })
+  res.json({ profile: profile.after, stats, auditLogId: profile.auditLog?.id ?? null, changedFields: profile.changedFields })
 })
 
 adminVerifiersRouter.delete('/:userId', async (req: Request, res: Response) => {
   const userId = req.params.userId
-  const deleted = await deleteVerifierProfile(userId)
+  const result = await deleteVerifierProfile(userId, { actorUserId: req.user!.userId })
 
-  if (!deleted) {
+  if (!result.deleted) {
     res.status(404).json({ error: 'verifier not found' })
     return
   }
 
-  console.info(JSON.stringify({ level: 'info', event: 'admin.verifier_profile.deleted', userIdPrefix: maskUserId(userId) }))
   res.status(204).send()
 })
 
 adminVerifiersRouter.post('/:userId/approve', async (req: Request, res: Response) => {
-  const userId = req.params.userId
-  await createOrGetVerifierProfile(userId)
-  const updated = await setVerifierStatus(userId, 'approved')
-  res.json({ profile: updated, stats: await getVerifierStats(userId) })
+  await createOrGetAndTransitionStatus(req, res, req.params.userId, 'approved')
 })
 
 adminVerifiersRouter.post('/:userId/suspend', async (req: Request, res: Response) => {
-  const userId = req.params.userId
-  await createOrGetVerifierProfile(userId)
-  const updated = await setVerifierStatus(userId, 'suspended')
-  res.json({ profile: updated, stats: await getVerifierStats(userId) })
+  await createOrGetAndTransitionStatus(req, res, req.params.userId, 'suspended')
+})
+
+adminVerifiersRouter.post('/:userId/deactivate', async (req: Request, res: Response) => {
+  await transitionStatus(req, res, req.params.userId, 'deactivated')
+})
+
+adminVerifiersRouter.post('/:userId/reactivate', async (req: Request, res: Response) => {
+  await transitionStatus(req, res, req.params.userId, 'pending')
 })
 
 const isVerifierStatus = (value: unknown): value is VerifierStatus =>
-  value === 'pending' || value === 'approved' || value === 'suspended'
+  value === 'pending' || value === 'approved' || value === 'suspended' || value === 'deactivated'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -165,5 +173,36 @@ const isDuplicateError = (error: unknown): boolean => {
     || maybeErr.constraint === 'verifiers_pkey'
     || maybeErr.message?.toLowerCase().includes('unique') === true
 }
+const transitionStatus = async (req: Request, res: Response, userId: string, status: VerifierStatus): Promise<void> => {
+  try {
+    const updated = await transitionVerifier(userId, status, { actorUserId: req.user!.userId })
+    if (!updated) {
+      res.status(404).json({ error: 'verifier not found' })
+      return
+    }
+    res.json({
+      profile: updated.after,
+      stats: await getVerifierStats(userId),
+      auditLogId: updated.auditLog?.id ?? null,
+      changedFields: updated.changedFields,
+    })
+  } catch (error) {
+    if (error instanceof InvalidVerifierStatusTransitionError) {
+      res.status(409).json({ error: error.message })
+      return
+    }
 
-const maskUserId = (userId: string): string => (userId.length <= 8 ? userId : userId.slice(0, 8))
+    res.status(500).json({ error: 'internal server error' })
+  }
+}
+
+const createOrGetAndTransitionStatus = async (req: Request, res: Response, userId: string, status: VerifierStatus): Promise<void> => {
+  try {
+    await createOrGetVerifierProfile(userId, undefined, { actorUserId: req.user!.userId })
+  } catch {
+    res.status(500).json({ error: 'internal server error' })
+    return
+  }
+
+  await transitionStatus(req, res, userId, status)
+}

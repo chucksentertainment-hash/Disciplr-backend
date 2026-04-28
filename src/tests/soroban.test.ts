@@ -104,7 +104,7 @@ const restoreEnv = (): void => {
 const createMockClient = (
   result?: { txHash: string },
   error?: Error,
-): { client: SorobanClient; spy: jest.Mock } => {
+): { client: SorobanClient; spy: jest.Mock<SorobanClient['submitVaultCreation']> } => {
   const spy = jest.fn<SorobanClient['submitVaultCreation']>()
   if (error) {
     spy.mockRejectedValue(error)
@@ -288,7 +288,7 @@ describe('soroban service', () => {
 
       // Verify the mock client was called with the right config and args
       expect(spy).toHaveBeenCalledTimes(1)
-      const [passedConfig, passedArgs] = spy.mock.calls[0]
+      const [passedConfig, passedArgs] = spy.mock.calls[0] as [SorobanConfig, Record<string, any>]
       expect(passedConfig.contractId).toBe(FULL_ENV.SOROBAN_CONTRACT_ID)
       expect(passedConfig.secretKey).toBe(FULL_ENV.SOROBAN_SECRET_KEY)
       expect(passedArgs.vaultId).toBe(vault.id)
@@ -341,7 +341,7 @@ describe('soroban service', () => {
         makeVault(),
       )
 
-      const [passedConfig] = spy.mock.calls[0]
+      const [passedConfig] = spy.mock.calls[0] as [SorobanConfig, any]
       expect(passedConfig.rpcUrl).toBe(FULL_ENV.SOROBAN_RPC_URL)
       expect(passedConfig.networkPassphrase).toBe(FULL_ENV.SOROBAN_NETWORK_PASSPHRASE)
     })

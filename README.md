@@ -121,6 +121,7 @@ curl -X POST http://localhost:3000/api/jobs/enqueue \
 - `ENABLE_JOB_SCHEDULER` (`false` disables recurring jobs)
 - `DEADLINE_CHECK_INTERVAL_MS` (default: `60000`)
 - `ANALYTICS_RECOMPUTE_INTERVAL_MS` (default: `300000`)
+- `MAX_JSON_BODY_SIZE` (default: `500kb`)
 
 ### Example: create a vault
 - Node.js + TypeScript
@@ -159,6 +160,28 @@ API runs at `http://localhost:3000`.
 | `npm run migrate:latest` | Apply all pending migrations |
 | `npm run migrate:rollback` | Roll back the latest migration batch |
 | `npm run migrate:status` | Show migration status |
+| `npm run openapi:generate` | Regenerate OpenAPI specification from Zod schemas |
+| `npm run openapi:validate` | Validate the generated OpenAPI specification |
+
+## API Documentation
+
+The API is documented using OpenAPI 3.1. The specification is generated automatically from the Zod schemas used in the code.
+
+### View Documentation
+The specification file is located at `docs/openapi.yaml`. You can view it using any OpenAPI/Swagger viewer (e.g., [Swagger Editor](https://editor.swagger.io/)).
+
+### Generate Specification
+To regenerate the specification after making changes to the routes or schemas:
+```bash
+npm run openapi:generate
+```
+
+### Validate Specification
+To validate the specification:
+```bash
+npm run openapi:validate
+```
+
 
 ## Abuse detection instrumentation
 
@@ -173,6 +196,12 @@ The backend includes abuse-oriented security instrumentation middleware.
   - `security.failed_login_attempt`
   - `security.rate_limit_triggered`
   - `security.suspicious_pattern`
+- Suspicious pattern alerts are de-duplicated per source IP and pattern category for
+  `SECURITY_ALERT_COOLDOWN_MS`; suppressed repeats do not increment the
+  `suspiciousPatterns` counters in the security snapshot.
+- Failed-login tracking includes `401` and `403` responses on auth/login paths.
+  Rate-limit triggers are not de-duplicated; each `429` increments
+  `rateLimitTriggers`.
 
 ### Thresholds (env-configurable)
 

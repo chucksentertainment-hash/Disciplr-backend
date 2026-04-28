@@ -1,4 +1,6 @@
+import { NotificationService } from '../services/notifications/factory.js'
 import type { JobHandler, JobType } from './types.js'
+import { markVaultExpiries } from '../services/vault.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -16,19 +18,20 @@ const logJob = (type: JobType, message: string): void => {
 
 export const defaultJobHandlers: JobHandlerRegistry = {
   'notification.send': async (payload, context) => {
-    await sleep(40)
+    await NotificationService.send(payload.recipient, payload.subject, payload.body)
     logJob(
       'notification.send',
-      `sent recipient=${payload.recipient} subject="${payload.subject}" attempt=${context.attempt}`,
+      `executed job_id=${context.jobId} attempt=${context.attempt}`,
     )
   },
   'deadline.check': async (payload, context) => {
     await sleep(30)
+    const expiredCount = await markVaultExpiries()
     const target = payload.vaultId ?? 'all-active-vaults'
     const deadline = payload.deadlineIso ?? 'not-provided'
     logJob(
       'deadline.check',
-      `checked target=${target} deadline=${deadline} source=${payload.triggerSource} attempt=${context.attempt}`,
+      `checked target=${target} deadline=${deadline} expired=${expiredCount} source=${payload.triggerSource} attempt=${context.attempt}`,
     )
   },
   'oracle.call': async (payload, context) => {

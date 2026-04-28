@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 import type { Request, Response } from 'express'
 
 export interface RateLimitConfig {
@@ -23,6 +23,10 @@ const logRateLimitBreached = (req: Request): void => {
   console.warn(`[RATE_LIMIT_BREACH] ${timestamp} | IP: ${clientIp} | API_KEY: ${apiKey} | ${method} ${path} | User-Agent: ${userAgent}`)
 }
 
+/** Normalize an IP string for use as a rate-limit key, handling IPv6 subnets. */
+const normalizeIp = (req: Request): string =>
+  ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? 'unknown')
+
 const createRateLimiter = (config: Partial<RateLimitConfig> = {}) => {
   const windowMs = config.windowMs ?? 15 * 60 * 1000
   const max = config.max ?? 100
@@ -35,7 +39,7 @@ const createRateLimiter = (config: Partial<RateLimitConfig> = {}) => {
     skipSuccessfulRequests: config.skipSuccessfulRequests ?? false,
     keyGenerator: config.keyGenerator ?? ((req) => {
       const apiKey = req.headers['x-api-key'] as string | undefined
-      return apiKey ?? req.ip ?? req.socket.remoteAddress ?? 'unknown'
+      return apiKey ?? normalizeIp(req)
     }),
     handler: config.handler ?? ((req, res) => {
       logRateLimitBreached(req)
@@ -75,6 +79,12 @@ export const strictRateLimiter = createRateLimiter({
   windowMs: 60 * 60 * 1000,
   max: 10,
   message: 'Rate limit exceeded. This endpoint has strict rate limits.',
+})
+
+export const metricsRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: 'Metrics endpoint rate limit exceeded. Please try again later.',
 })
 
 export { createRateLimiter }

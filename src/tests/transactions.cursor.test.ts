@@ -21,7 +21,7 @@ describe('Transactions Cursor Pagination Stability', () => {
       id: 'vault-cursor-test-12345678901234567890123456789012345678901234567',
       creator: 'GTEST_CURSOR',
       amount: '1000',
-      end_timestamp: new Date(Date.now() + 1000000),
+      end_date: new Date(Date.now() + 1000000),
       success_destination: 'GDEST',
       failure_destination: 'GFAIL',
       status: 'active',

@@ -1,19 +1,23 @@
 import { validateEnv, type Env, type EnvWarning } from './env.js'
 
-type AppConfig = {
+export type AppConfig = {
   env: string
   port: number
   serviceName: string
   corsOrigins: string[] | '*'
+  maxJsonBodySize: string
 }
 
 /**
  * Resolves the list of allowed CORS origins from the CORS_ORIGINS env var.
  *
+ * The raw value has already been validated by envSchema (each entry is a
+ * valid http:// or https:// URL, or the whole value is "*").  This function
+ * is a pure transformer — it splits and trims the pre-validated string.
+ *
  * Production behaviour: if CORS_ORIGINS is not explicitly configured the
- * function returns an empty array (block all cross-origin requests) and emits a
- * structured warning so the misconfiguration is immediately visible in logs
- * rather than silently shipping an open API.
+ * function returns an empty array (block all cross-origin requests) and emits
+ * a structured warning so the misconfiguration is immediately visible in logs.
  *
  * Development / test behaviour: falls back to http://localhost:3000 so local
  * development works without requiring extra env setup.
@@ -26,7 +30,7 @@ export function parseCorsOrigins(value: string | undefined, env: string): string
     if (value.trim() === '*') return '*'
     return value
       .split(',')
-      .map((origin) => origin.trim())
+      .map((origin) => origin.trim().replace(/\/+$/, ''))
       .filter(Boolean)
   }
 
@@ -38,6 +42,7 @@ export function parseCorsOrigins(value: string | undefined, env: string): string
         service: 'disciplr-backend',
         message:
           'CORS_ORIGINS is not configured in production — all cross-origin requests will be blocked. Set CORS_ORIGINS to the allowed frontend origin(s).',
+        timestamp: new Date().toISOString(),
       }),
     )
     return []
@@ -96,4 +101,5 @@ export const config: AppConfig = {
     _validated?.CORS_ORIGINS ?? process.env.CORS_ORIGINS,
     _env,
   ),
+  maxJsonBodySize: _validated?.MAX_JSON_BODY_SIZE ?? process.env.MAX_JSON_BODY_SIZE ?? '500kb',
 }

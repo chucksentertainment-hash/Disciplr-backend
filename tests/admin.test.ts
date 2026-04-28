@@ -3,6 +3,8 @@ import { app } from '../src/app.js'
 import { db } from '../src/db/index.js'
 import { UserRole, UserStatus } from '../src/types/user.js'
 import { generateAccessToken } from '../src/lib/auth-utils.js'
+import { clearProcessedOverrides, ValidOverrideReasonCodes } from '../src/routes/admin.js'
+import { clearAuditLogs } from '../src/lib/audit-logs.js'
 
 describe('Admin User Management API', () => {
   let adminToken: string
@@ -580,6 +582,338 @@ describe('Admin User Management API', () => {
 
       expect(hardDeleteLog).toBeDefined()
       expect(hardDeleteLog.metadata).toHaveProperty('deletion_type', 'hard')
+    })
+  })
+})
+
+describe('Admin Override Endpoints', () => {
+  let adminToken: string
+  let userToken: string
+  let testAdminId: string
+  let testVaultId: string
+
+  beforeAll(async () => {
+    // Clean up and create test data
+    await db('users').where('email', 'like', '%override-test%').del()
+
+    const adminUser = {
+      id: 'admin-override-test-id',
+      email: 'admin-override-test@example.com',
+      passwordHash: 'hashed-password',
+      role: UserRole.ADMIN,
+      status: UserStatus.ACTIVE,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }
+
+    const regularUser = {
+      id: 'user-override-test-id',
+      email: 'user-override-test@example.com',
+      passwordHash: 'hashed-password',
+      role: UserRole.USER,
+      status: UserStatus.ACTIVE,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }
+
+    await db('users').insert([adminUser, regularUser])
+    testAdminId = adminUser.id
+
+    adminToken = generateAccessToken({ userId: adminUser.id, role: UserRole.ADMIN })
+    userToken = generateAccessToken({ userId: regularUser.id, role: UserRole.USER })
+  })
+
+  beforeEach(async () => {
+    // Clear idempotency cache and audit logs before each test
+    clearProcessedOverrides()
+    clearAuditLogs()
+
+    // Create a test vault for each test
+    testVaultId = `test-vault-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    await db('vaults').insert({
+      id: testVaultId,
+      amount: '1000',
+      start_date: new Date().toISOString(),
+      end_date: new Date(Date.now() + 86400000).toISOString(),
+      verifier: 'test-verifier',
+      success_destination: 'success-addr',
+      failure_destination: 'failure-addr',
+      creator: testAdminId,
+      status: 'active',
+      created_at: new Date().toISOString()
+    })
+  })
+
+  afterEach(async () => {
+    // Clean up test vaults
+    await db('vaults').where('id', 'like', 'test-vault%').del()
+  })
+
+  afterAll(async () => {
+    // Clean up test users
+    await db('users').where('email', 'like', '%override-test%').del()
+    await db.destroy()
+  })
+
+  describe('POST /api/admin/overrides/vaults/:id/cancel', () => {
+    test('should require reasonCode field', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'Some reason' })
+        .expect(400)
+
+      expect(response.body).toHaveProperty('error', 'Missing required field: reasonCode')
+      expect(response.body).toHaveProperty('validReasonCodes', ValidOverrideReasonCodes)
+    })
+
+    test('should reject invalid reasonCode', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'INVALID_REASON' })
+        .expect(400)
+
+      expect(response.body.error).toContain('Invalid reasonCode')
+      expect(response.body).toHaveProperty('validReasonCodes', ValidOverrideReasonCodes)
+    })
+
+    test('should accept all valid reason codes', async () => {
+      for (const reasonCode of ValidOverrideReasonCodes) {
+        // Create a fresh vault for each iteration
+        const freshVaultId = `test-vault-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+        await db('vaults').insert({
+          id: freshVaultId,
+          amount: '1000',
+          start_date: new Date().toISOString(),
+          end_date: new Date(Date.now() + 86400000).toISOString(),
+          verifier: 'test-verifier',
+          success_destination: 'success-addr',
+          failure_destination: 'failure-addr',
+          creator: testAdminId,
+          status: 'active',
+          created_at: new Date().toISOString()
+        })
+
+        const response = await request(app)
+          .post(`/api/admin/overrides/vaults/${freshVaultId}/cancel`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ reasonCode, reason: `Test cancel with ${reasonCode}` })
+
+        expect(response.status).toBe(200)
+        expect(response.body.vault.status).toBe('cancelled')
+
+        // Clean up
+        await db('vaults').where('id', freshVaultId).del()
+      }
+    })
+
+    test('should be idempotent with explicit idempotencyKey', async () => {
+      const idempotencyKey = `test-key-${Date.now()}`
+
+      // First request should succeed
+      const firstResponse = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          reasonCode: 'USER_REQUEST',
+          reason: 'User requested cancellation',
+          idempotencyKey
+        })
+        .expect(200)
+
+      expect(firstResponse.body).toHaveProperty('auditLogId')
+      expect(firstResponse.body).toHaveProperty('idempotencyKey', idempotencyKey)
+
+      // Second request should return 409 with idempotent replay info
+      const secondResponse = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          reasonCode: 'USER_REQUEST',
+          reason: 'User requested cancellation',
+          idempotencyKey
+        })
+        .expect(409)
+
+      expect(secondResponse.body.error).toContain('Override already processed')
+      expect(secondResponse.body).toHaveProperty('auditLogId', firstResponse.body.auditLogId)
+      expect(secondResponse.body).toHaveProperty('processedAt')
+    })
+
+    test('should be idempotent without explicit idempotencyKey (auto-generated)', async () => {
+      // First request should succeed
+      const firstResponse = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          reasonCode: 'SYSTEM_ERROR',
+          reason: 'System error cancellation'
+        })
+        .expect(200)
+
+      expect(firstResponse.body).toHaveProperty('idempotencyKey')
+      const autoKey = firstResponse.body.idempotencyKey
+
+      // Second request should return 409
+      const secondResponse = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          reasonCode: 'SYSTEM_ERROR',
+          reason: 'System error cancellation'
+        })
+        .expect(409)
+
+      expect(secondResponse.body.error).toContain('Override already processed')
+      expect(secondResponse.body).toHaveProperty('idempotencyKey', autoKey)
+    })
+
+    test('should create audit log with before/after diff', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .set('User-Agent', 'test-agent')
+        .send({
+          reasonCode: 'FRAUD_DETECTED',
+          reason: 'Fraud detected in vault',
+          details: 'Suspicious activity detected'
+        })
+        .expect(200)
+
+      // Fetch the audit log
+      const auditLogId = response.body.auditLogId
+      const auditResponse = await request(app)
+        .get(`/api/admin/audit-logs/${auditLogId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200)
+
+      const auditLog = auditResponse.body
+      expect(auditLog.action).toBe('admin.override')
+      expect(auditLog.target_type).toBe('vault')
+      expect(auditLog.target_id).toBe(testVaultId)
+
+      // Check metadata structure
+      expect(auditLog.metadata).toHaveProperty('override_type', 'vault.cancel')
+      expect(auditLog.metadata).toHaveProperty('reason_code', 'FRAUD_DETECTED')
+      expect(auditLog.metadata).toHaveProperty('reason_text')
+      expect(auditLog.metadata).toHaveProperty('details')
+      expect(auditLog.metadata).toHaveProperty('idempotency_key')
+      expect(auditLog.metadata).toHaveProperty('admin_id', testAdminId)
+
+      // Check diff structure
+      expect(auditLog.metadata).toHaveProperty('diff')
+      expect(auditLog.metadata.diff).toHaveProperty('status')
+      expect(auditLog.metadata.diff.status.before).toBe('active')
+      expect(auditLog.metadata.diff.status.after).toBe('cancelled')
+      expect(auditLog.metadata.diff).toHaveProperty('changed_at')
+
+      // Check request context
+      expect(auditLog.metadata).toHaveProperty('request_context')
+      expect(auditLog.metadata.request_context).toHaveProperty('user_agent', 'test-agent')
+      expect(auditLog.metadata.request_context).toHaveProperty('method', 'POST')
+      expect(auditLog.metadata.request_context).toHaveProperty('path')
+    })
+
+    test('should sanitize PII in reason and details fields', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          reasonCode: 'POLICY_VIOLATION',
+          reason: 'Contact user at john.doe@example.com for more info',
+          details: 'User IP was 192.168.1.1 and SSN 123-45-6789. Secret token: abcdef12345678901234567890abcdef'
+        })
+        .expect(200)
+
+      const auditLogId = response.body.auditLogId
+      const auditResponse = await request(app)
+        .get(`/api/admin/audit-logs/${auditLogId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200)
+
+      const auditLog = auditResponse.body
+
+      // Check that PII was redacted
+      expect(auditLog.metadata.reason_text).toContain('[REDACTED_EMAIL]')
+      expect(auditLog.metadata.reason_text).not.toContain('john.doe@example.com')
+      expect(auditLog.metadata.reason_text).not.toContain('@example.com')
+    })
+
+    test('should return 409 when vault is already cancelled with audit log', async () => {
+      // First cancel the vault
+      await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'USER_REQUEST' })
+        .expect(200)
+
+      clearProcessedOverrides() // Clear idempotency to test the actual vault state check
+
+      // Second cancel should return 409 with audit log
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'EMERGENCY_ADMIN_ACTION' })
+        .expect(409)
+
+      expect(response.body.error).toContain('Vault is already cancelled')
+      expect(response.body).toHaveProperty('auditLogId')
+    })
+
+    test('should return 409 for non-cancellable vault status', async () => {
+      // Update vault to completed status (non-cancellable)
+      await db('vaults').where('id', testVaultId).update({ status: 'completed' })
+
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'COMPLIANCE_REQUIREMENT' })
+        .expect(409)
+
+      expect(response.body.error).toContain('cannot be cancelled')
+      expect(response.body).toHaveProperty('currentStatus', 'completed')
+    })
+
+    test('should return 404 for non-existent vault', async () => {
+      const response = await request(app)
+        .post('/api/admin/overrides/vaults/non-existent-vault-id/cancel')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'TESTING_CLEANUP' })
+        .expect(404)
+
+      expect(response.body).toHaveProperty('error', 'Vault not found')
+    })
+
+    test('should deny access to non-admin users', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ reasonCode: 'USER_REQUEST' })
+        .expect(403)
+
+      expect(response.body).toHaveProperty('error')
+    })
+
+    test('should deny unauthenticated requests', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .send({ reasonCode: 'USER_REQUEST' })
+        .expect(401)
+
+      expect(response.body).toHaveProperty('error')
+    })
+
+    test('should include response with previous and new status', async () => {
+      const response = await request(app)
+        .post(`/api/admin/overrides/vaults/${testVaultId}/cancel`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reasonCode: 'USER_REQUEST' })
+        .expect(200)
+
+      expect(response.body).toHaveProperty('previousStatus', 'active')
+      expect(response.body).toHaveProperty('newStatus', 'cancelled')
+      expect(response.body.vault.status).toBe('cancelled')
     })
   })
 })

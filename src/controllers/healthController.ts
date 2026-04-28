@@ -1,7 +1,10 @@
 import type { Request, Response } from 'express'
-import { buildHealthStatus } from '../services/healthService.js'
+import { healthService } from '../services/healthService.js'
 import { config } from '../config/index.js'
 
 export const getHealth = (_req: Request, res: Response) => {
-  res.json(buildHealthStatus(config.serviceName))
+  // Note: this controller is kept for structural consistency but the router
+  // currently invokes healthService directly.
+  res.json(healthService.buildHealthStatus(config.serviceName))
 }
+

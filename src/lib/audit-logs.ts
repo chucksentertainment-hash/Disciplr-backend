@@ -30,7 +30,7 @@ const toSnakeCase = (input: string): string =>
     .toLowerCase()
 
 const isSensitiveKey = (key: string): boolean =>
-  /(password|token|refresh[_-]?token|email|ssn|credit|card|ip)/i.test(key)
+  /(password|token|refresh[_-]?token|email|ssn|credit|card|ip|secret|key|auth)/i.test(key)
 
 const sanitizeMetadataValue = (key: string, value: unknown): unknown => {
   if (typeof value === 'string') {
@@ -40,6 +40,14 @@ const sanitizeMetadataValue = (key: string, value: unknown): unknown => {
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
       return '[redacted]'
     }
+    // Redact potential tokens/secrets (long alphanumeric strings)
+    if (/^[A-Za-z0-9]{32,}$/.test(value)) {
+      return '[redacted]'
+    }
+  }
+  // Recursively sanitize nested objects
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return sanitizeMetadata(value as Record<string, unknown>)
   }
   return value
 }

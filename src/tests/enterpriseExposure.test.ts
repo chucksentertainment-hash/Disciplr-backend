@@ -1,7 +1,7 @@
-import { toPublicVault, toPublicMilestone } from '../utils/mappers';
-import { maskPii } from '../utils/privacy';
-import { Milestone } from '../types/horizonSync';
-import { Vault, VaultStatus } from '../types/vault';
+import { toPublicVault, toPublicMilestone } from '../utils/mappers.js';
+import { maskPii } from '../utils/privacy.js';
+import { Milestone } from '../types/horizonSync.js';
+import { Vault, VaultStatus } from '../types/vault.js';
 
 describe('Enterprise API Exposure Audit', () => {
   const mockInternalVault: Vault = {
@@ -30,7 +30,6 @@ describe('Enterprise API Exposure Audit', () => {
     // Verify internal fields are strictly omitted
     expect(result).not.toHaveProperty('created_at');
     expect(result).not.toHaveProperty('updated_at');
-    expect(result).not.toHaveProperty('created_at');
     
     // Verify date format conversion
     expect(typeof result.startTimestamp).toBe('string');
@@ -71,5 +70,31 @@ describe('Enterprise API Exposure Audit', () => {
     const hash = maskPii(address);
     expect(hash).toHaveLength(8);
     expect(maskPii(address)).toBe(hash); // Deterministic
+  });
+
+  test('EnterpriseVault DTO should never contain organization_id', () => {
+    const internalVault = {
+      ...mockInternalVault,
+      organization_id: 'org_123'
+    };
+    const result = toPublicVault(internalVault as any);
+    expect(result).not.toHaveProperty('organization_id');
+    expect(result).not.toHaveProperty('user_id');
+  });
+
+  test('toPublicMilestone should strip all metadata fields', () => {
+    const mockMilestone: any = {
+      id: 'm_1',
+      vaultId: 'v_1',
+      deadline: new Date(),
+      metadata: { secret: 'data' },
+      internal_notes: 'private',
+      status: 'pending'
+    };
+
+    const result = toPublicMilestone(mockMilestone);
+    expect(result).not.toHaveProperty('metadata');
+    expect(result).not.toHaveProperty('internal_notes');
+    expect(result.status).toBe('pending');
   });
 });

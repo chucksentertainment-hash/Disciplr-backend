@@ -1,0 +1,365 @@
+openapi: 3.1.0
+info:
+  title: Disciplr API
+  version: 0.1.0
+  description: API documentation for Disciplr backend
+servers:
+  - url: /api
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: Invalid request parameters
+            details: {}
+            requestId:
+              type: string
+              example: req_123
+          required:
+            - code
+            - message
+      required:
+        - error
+    Vault:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        creator:
+          type: string
+        amount:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - completed
+            - failed
+            - cancelled
+        startTimestamp:
+          type: string
+          format: date-time
+        endTimestamp:
+          type: string
+          format: date-time
+        successDestination:
+          type: string
+        failureDestination:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - creator
+        - amount
+        - status
+        - startTimestamp
+        - endTimestamp
+        - successDestination
+        - failureDestination
+        - createdAt
+    Milestone:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        vaultId:
+          type: string
+          format: uuid
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+            - verified
+        createdAt:
+          type: string
+          format: date-time
+        verifiedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - vaultId
+        - description
+        - status
+        - createdAt
+  parameters: {}
+paths:
+  /api/health:
+    get:
+      summary: Check API health
+      tags:
+        - Health
+      responses:
+        "200":
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+                  uptime:
+                    type: number
+                  jobs: {}
+                required:
+                  - status
+                  - timestamp
+                  - uptime
+  /api/auth/register:
+    post:
+      summary: Register a new user
+      tags:
+        - Auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                role:
+                  type: string
+                  enum:
+                    - USER
+                    - VERIFIER
+                    - ADMIN
+              required:
+                - email
+                - password
+      responses:
+        "201":
+          description: User registered successfully
+          content:
+            application/json:
+              schema: {}
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/auth/login:
+    post:
+      summary: Login user
+      tags:
+        - Auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+              required:
+                - email
+                - password
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema: {}
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/vaults:
+    get:
+      summary: List vaults
+      tags:
+        - Vaults
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of vaults
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Vault"
+    post:
+      summary: Create a new vault
+      tags:
+        - Vaults
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: string
+                startDate:
+                  type: string
+                endDate:
+                  type: string
+                verifier:
+                  type: string
+                  pattern: ^G[A-Z2-7]{55}$
+                destinations:
+                  type: object
+                  properties:
+                    success:
+                      type: string
+                      pattern: ^G[A-Z2-7]{55}$
+                    failure:
+                      type: string
+                      pattern: ^G[A-Z2-7]{55}$
+                  required:
+                    - success
+                    - failure
+                milestones:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      title:
+                        type: string
+                      description:
+                        type: string
+                      dueDate:
+                        type: string
+                      amount:
+                        type: string
+                    required:
+                      - title
+                      - dueDate
+                      - amount
+                  minItems: 1
+                creator:
+                  type: string
+                  pattern: ^G[A-Z2-7]{55}$
+                onChain:
+                  type: object
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - build
+                        - submit
+                      default: build
+                    contractId:
+                      type: string
+                    networkPassphrase:
+                      type: string
+                    sourceAccount:
+                      type: string
+              required:
+                - amount
+                - startDate
+                - endDate
+                - verifier
+                - destinations
+                - milestones
+      responses:
+        "201":
+          description: Vault created
+          content:
+            application/json:
+              schema: {}
+  /api/vaults/{vaultId}/milestones:
+    get:
+      summary: Get milestones for a vault
+      tags:
+        - Milestones
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of milestones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  milestones:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Milestone"
+                required:
+                  - milestones
+  /api/jobs/enqueue:
+    post:
+      summary: Enqueue a background job
+      tags:
+        - Jobs
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                payload: {}
+                delayMs:
+                  type: number
+                maxAttempts:
+                  type: number
+              required:
+                - type
+      responses:
+        "202":
+          description: Job enqueued
+          content:
+            application/json:
+              schema: {}
+  /api/analytics/summary:
+    get:
+      summary: Get analytics summary
+      tags:
+        - Analytics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema: {}
+webhooks: {}

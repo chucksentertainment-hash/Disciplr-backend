@@ -28,6 +28,8 @@ export interface JWTPayload {
   role: UserRole
   email?: string
   jti?: string
+  isEnterprise?: boolean
+  enterpriseId?: string
 }
 
 declare global {

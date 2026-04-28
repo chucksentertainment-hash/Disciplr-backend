@@ -1,4 +1,5 @@
 import { Knex } from 'knex';
+import { sanitizeObject, isValidField } from '../lib/validation.js';
 
 /**
  * Supported operators for filtering.
@@ -53,18 +54,18 @@ export interface QueryParserConfig {
 
 /**
  * QueryParser handles the safe parsing of dynamic query filters, pagination, and sorting
- * from untrusted user input. It prevents SQL injection by whitelisting column names 
- * and using Knex's parameter binding for values.
+ * from untrusted user input. It prevents SQL injection and prototype pollution by 
+ * sanitizing input, whitelisting column names, and using Knex's parameter binding.
  */
 export class QueryParser {
-  private allowedColumns: Set<string>;
+  private allowedColumns: string[];
   private defaultLimit: number;
   private maxLimit: number;
   private logger?: QueryParserConfig['logger'];
   private metricsHook?: QueryParserConfig['metricsHook'];
 
   constructor(config: QueryParserConfig) {
-    this.allowedColumns = new Set(config.allowedColumns);
+    this.allowedColumns = config.allowedColumns;
     this.defaultLimit = config.defaultLimit ?? 20;
     this.maxLimit = config.maxLimit ?? 100;
     this.logger = config.logger;
@@ -77,10 +78,13 @@ export class QueryParser {
   parse(query: any): ParsedQuery {
     const conditions: QueryCondition[] = [];
     
+    // 0. Sanitize the entire query object to prevent prototype pollution
+    const safeQuery = sanitizeObject(query);
+    
     // 1. Parse filters
-    if (query?.filter && typeof query.filter === 'object') {
-      for (const [column, filterValue] of Object.entries(query.filter)) {
-        if (!this.allowedColumns.has(column)) {
+    if (safeQuery?.filter && typeof safeQuery.filter === 'object') {
+      for (const [column, filterValue] of Object.entries(safeQuery.filter)) {
+        if (!isValidField(column, this.allowedColumns)) {
           this.logger?.warn('QueryParser: Restricted column access attempted', { column });
           this.metricsHook?.({ event: 'restricted_column_access', column });
           continue;
@@ -110,20 +114,20 @@ export class QueryParser {
     }
 
     // 2. Parse Pagination
-    let limit = parseInt(query?.limit as string, 10) || this.defaultLimit;
+    let limit = parseInt(safeQuery?.limit as string, 10) || this.defaultLimit;
     if (limit > this.maxLimit) limit = this.maxLimit;
     if (limit < 0) limit = this.defaultLimit;
-    const offset = Math.max(0, parseInt(query?.offset as string, 10) || 0);
+    const offset = Math.max(0, parseInt(safeQuery?.offset as string, 10) || 0);
 
     // 3. Parse Sorting
     const sorts: SortCondition[] = [];
-    const sortInputs = Array.isArray(query?.sort) ? query.sort : [query?.sort].filter(Boolean);
+    const sortInputs = Array.isArray(safeQuery?.sort) ? safeQuery.sort : [safeQuery?.sort].filter(Boolean);
 
     for (const sortInput of sortInputs) {
       if (typeof sortInput !== 'string') continue;
       
       const [col, direction] = sortInput.split(':');
-      if (this.allowedColumns.has(col)) {
+      if (isValidField(col, this.allowedColumns)) {
         sorts.push({
           column: col,
           order: direction?.toLowerCase() === 'desc' ? 'desc' : 'asc'

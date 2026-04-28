@@ -199,4 +199,41 @@ describe('CORS middleware (integration)', () => {
       logSpy.mockRestore()
     }
   })
+
+  it('blocks requests with Origin: null', async () => {
+    const res = await request(app)
+      .get('/api/health')
+      .set('Origin', 'null')
+
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined()
+  })
+
+  it('blocks preflight requests with Origin: null', async () => {
+    const res = await request(app)
+      .options('/api/health')
+      .set('Origin', 'null')
+      .set('Access-Control-Request-Method', 'GET')
+
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+  })
+
+  it('includes allowed headers in preflight response for trusted origin', async () => {
+    const res = await request(app)
+      .options('/api/vaults')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST')
+
+    const allowedHeaders = res.headers['access-control-allow-headers'] as string
+    expect(allowedHeaders).toContain('Content-Type')
+    expect(allowedHeaders).toContain('Authorization')
+  })
+
+  it('allows origin with trailing slash matching normalized allowlist entry', async () => {
+    const res = await request(app)
+      .get('/api/health')
+      .set('Origin', 'http://localhost:3000/')
+
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000/')
+  })
 })

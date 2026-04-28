@@ -1,4 +1,5 @@
 import { z } from 'zod'
+export { flattenZodErrors } from '../lib/validation.js'
 
 // ─── Soroban-aligned constants ───────────────────────────────────────────────
 
@@ -118,24 +119,3 @@ export const createVaultSchema = z
   })
 
 export type ParsedCreateVaultInput = z.infer<typeof createVaultSchema>
-
-// ─── Error helpers ───────────────────────────────────────────────────────────
-
-const formatIssuePath = (path: ReadonlyArray<PropertyKey>): string =>
-  path
-    .filter((seg): seg is string | number => typeof seg === 'string' || typeof seg === 'number')
-    .reduce<string>((acc, seg, i) => {
-      if (typeof seg === 'number') return `${acc}[${seg}]`
-      return i === 0 ? seg : `${acc}.${seg}`
-    }, '')
-
-/**
- * Flatten a ZodError into a string array that matches the existing error
- * format, e.g. "amount must be a positive number",
- * "milestones[0].dueDate must be a valid ISO timestamp".
- */
-export const flattenZodErrors = (error: z.ZodError): string[] =>
-  error.issues.map((issue) => {
-    const prefix = formatIssuePath(issue.path)
-    return prefix ? `${prefix} ${issue.message}` : issue.message
-  })

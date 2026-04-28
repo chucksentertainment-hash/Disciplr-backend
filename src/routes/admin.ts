@@ -1,13 +1,56 @@
 import { Router, Request, Response } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { authorize } from '../middleware/auth.middleware.js'
+import { requireAdmin } from '../middleware/rbac.js'
+import { metricsRateLimiter } from '../middleware/rateLimiter.js'
 import { UserRole, UserStatus } from '../types/user.js'
 import { userService, DeleteResult } from '../services/user.service.js'
 import { forceRevokeUserSessions } from '../services/session.js'
 import { createAuditLog, getAuditLogById, listAuditLogs } from '../lib/audit-logs.js'
 import { cancelVaultById } from '../services/vaultStore.js'
+import { getDBHealthMetrics } from '../services/dbMetrics.js'
+import { pool } from '../db/index.js'
 
 export const adminRouter = Router()
+
+// Valid override reason codes - ensures explicit, auditable reasons
+const ValidOverrideReasonCodes = [
+  'USER_REQUEST',
+  'FRAUD_DETECTED',
+  'SYSTEM_ERROR',
+  'POLICY_VIOLATION',
+  'EMERGENCY_ADMIN_ACTION',
+  'COMPLIANCE_REQUIREMENT',
+  'TESTING_CLEANUP',
+] as const
+
+type OverrideReasonCode = (typeof ValidOverrideReasonCodes)[number]
+
+// Track processed overrides for idempotency (in production, use distributed cache like Redis)
+const processedOverrides = new Map<string, { auditLogId: string; timestamp: string }>()
+
+// Test helper - clear processed overrides for test isolation
+export const clearProcessedOverrides = (): void => {
+  processedOverrides.clear()
+}
+
+// Export valid reason codes for tests and documentation
+export { ValidOverrideReasonCodes }
+
+const isValidReasonCode = (reason: unknown): reason is OverrideReasonCode =>
+  typeof reason === 'string' && ValidOverrideReasonCodes.includes(reason as OverrideReasonCode)
+
+// Sanitize reason text to prevent PII/secrets leakage
+const sanitizeReasonText = (reason: string): string => {
+  // Remove potential secrets/PII patterns
+  return reason
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[REDACTED_EMAIL]')
+    .replace(/\b(?:\d{4}-?){3}\d{4}\b/g, '[REDACTED_CARD]')
+    .replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED_SSN]')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[REDACTED_IP]')
+    .replace(/\b[A-Za-z0-9]{32,}\b/g, '[REDACTED_TOKEN]')
+    .substring(0, 500) // Limit length
+}
 
 // Apply authentication to all admin routes
 adminRouter.use(authenticate)
@@ -58,40 +101,126 @@ adminRouter.get('/audit-logs/:id', (req, res) => {
 })
 
 adminRouter.post('/overrides/vaults/:id/cancel', async (req, res) => {
-  const reason = typeof req.body?.reason === 'string' ? req.body.reason : 'No reason provided'
+  const { id } = req.params
+  const { reason, reasonCode, idempotencyKey, details } = req.body ?? {}
 
-  const cancelResult = await cancelVaultById(req.params.id)
+  // 1. Validate reason code is provided and valid
+  if (!reasonCode) {
+    res.status(400).json({
+      error: 'Missing required field: reasonCode',
+      validReasonCodes: ValidOverrideReasonCodes,
+    })
+    return
+  }
+
+  if (!isValidReasonCode(reasonCode)) {
+    res.status(400).json({
+      error: `Invalid reasonCode. Must be one of: ${ValidOverrideReasonCodes.join(', ')}`,
+      validReasonCodes: ValidOverrideReasonCodes,
+    })
+    return
+  }
+
+  // 2. Check idempotency - prevent repeated overrides
+  const effectiveIdempotencyKey = idempotencyKey ?? `${req.user!.userId}:${id}:cancel`
+  const existingOverride = processedOverrides.get(effectiveIdempotencyKey)
+  if (existingOverride) {
+    res.status(409).json({
+      error: 'Override already processed - idempotent replay',
+      idempotencyKey: effectiveIdempotencyKey,
+      auditLogId: existingOverride.auditLogId,
+      processedAt: existingOverride.timestamp,
+    })
+    return
+  }
+
+  // 3. Get current vault state before attempting cancel
+  const cancelResult = await cancelVaultById(id)
   if ('error' in cancelResult) {
     if (cancelResult.error === 'already_cancelled') {
-        res.status(409).json({ error: 'Vault is already cancelled' })
-        return
+      // Record this for idempotency tracking even though no change occurred
+      const auditLog = createAuditLog({
+        actor_user_id: req.user!.userId,
+        action: 'admin.override',
+        target_type: 'vault',
+        target_id: id,
+        metadata: {
+          override_type: 'vault.cancel',
+          result: 'no_op_already_cancelled',
+          previous_status: 'cancelled',
+          new_status: 'cancelled',
+          reason_code: reasonCode,
+          reason_text: reason ? sanitizeReasonText(String(reason)) : undefined,
+          idempotency_key: effectiveIdempotencyKey,
+        },
+      })
+      processedOverrides.set(effectiveIdempotencyKey, {
+        auditLogId: auditLog.id,
+        timestamp: auditLog.created_at,
+      })
+
+      res.status(409).json({
+        error: 'Vault is already cancelled',
+        auditLogId: auditLog.id,
+      })
+      return
     }
     if (cancelResult.error === 'not_cancellable') {
-        res.status(409).json({
-            error: `Vault cannot be cancelled from status: ${cancelResult.currentStatus}`,
-        })
-        return
+      res.status(409).json({
+        error: `Vault cannot be cancelled from status: ${cancelResult.currentStatus}`,
+        currentStatus: cancelResult.currentStatus,
+      })
+      return
     }
     res.status(404).json({ error: 'Vault not found' })
     return
   }
 
+  // 4. Sanitize optional details text
+  const sanitizedDetails = details ? sanitizeReasonText(String(details)) : undefined
+  const sanitizedReason = reason ? sanitizeReasonText(String(reason)) : undefined
+
+  // 5. Create rich audit log with before/after diffs and request context
   const auditLog = createAuditLog({
     actor_user_id: req.user!.userId,
     action: 'admin.override',
     target_type: 'vault',
     target_id: cancelResult.vault.id,
     metadata: {
-      overrideType: 'vault.cancel',
-      previousStatus: cancelResult.previousStatus,
-      newStatus: cancelResult.vault.status,
-      reason,
+      override_type: 'vault.cancel',
+      previous_status: cancelResult.previousStatus,
+      new_status: cancelResult.vault.status,
+      reason_code: reasonCode,
+      reason_text: sanitizedReason,
+      details: sanitizedDetails,
+      idempotency_key: effectiveIdempotencyKey,
+      request_context: {
+        user_agent: req.headers['user-agent'],
+        method: req.method,
+        path: req.originalUrl,
+      },
+      diff: {
+        status: {
+          before: cancelResult.previousStatus,
+          after: cancelResult.vault.status,
+        },
+        changed_at: new Date().toISOString(),
+      },
     },
+  })
+
+  // 6. Record for idempotency
+  processedOverrides.set(effectiveIdempotencyKey, {
+    auditLogId: auditLog.id,
+    timestamp: auditLog.created_at,
   })
 
   res.status(200).json({
     vault: cancelResult.vault,
     auditLogId: auditLog.id,
+    idempotencyKey: effectiveIdempotencyKey,
+    previousStatus: cancelResult.previousStatus,
+    newStatus: cancelResult.vault.status,
   })
 })
 
@@ -258,5 +387,62 @@ adminRouter.post('/users/:id/restore', async (req, res) => {
     })
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+/**
+ * Get database pool health metrics and slow query samples (Admin only)
+ * GET /api/admin/db/metrics
+ * Rate limited to 20 req/min for security and performance
+ */
+adminRouter.get('/db/metrics', metricsRateLimiter, (req: Request, res: Response) => {
+  try {
+    // Validate pool is available
+    if (!pool) {
+      res.status(503).json({
+        error: 'Database pool unavailable',
+        status: 'unavailable',
+      })
+      return
+    }
+
+    const metrics = getDBHealthMetrics(pool)
+
+    // Log metrics access for audit trail
+    createAuditLog({
+      actor_user_id: req.user!.userId,
+      action: 'admin.metrics.access',
+      target_type: 'database',
+      target_id: 'pool',
+      metadata: {
+        isHealthy: metrics.isHealthy,
+        warningsCount: metrics.warnings.length,
+        slowQueriesCount: metrics.slowQueries.length,
+      },
+    })
+
+    res.status(200).json({
+      data: {
+        timestamp: metrics.pool.timestamp,
+        isHealthy: metrics.isHealthy,
+        pool: {
+          available: metrics.pool.availableConnections,
+          waiting: metrics.pool.waitingClients,
+          total: metrics.pool.totalConnections,
+          capacity: metrics.pool.poolSize,
+        },
+        slowQueries: metrics.slowQueries.map((query) => ({
+          hash: query.queryHash,
+          pattern: query.queryPattern,
+          maxDurationMs: query.duration,
+          occurrences: query.count,
+          lastOccurred: query.lastOccurred,
+        })),
+        warnings: metrics.warnings,
+      },
+    })
+  } catch (error) {
+    console.error('Error retrieving DB metrics:', error)
+    res.status(500).json({ error: 'Failed to retrieve database metrics' })
   }
 })

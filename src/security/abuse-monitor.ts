@@ -181,6 +181,18 @@ export function getSecurityMetricsSnapshot(): Record<string, unknown> {
   }
 }
 
+export function __resetSecurityMonitorForTests(): void {
+  // Test-only reset hook for the module-level in-memory counters and IP state.
+  ipStates.clear()
+  metrics.failedLoginAttempts = 0
+  metrics.rateLimitTriggers = 0
+  metrics.suspiciousPatterns.endpoint_scan = 0
+  metrics.suspiciousPatterns.high_volume = 0
+  metrics.suspiciousPatterns.repeated_bad_requests = 0
+  metrics.suspiciousPatterns.failed_login_burst = 0
+  processedEvents = 0
+}
+
 function getIpState(ip: string, now: number): IpState {
   const existing = ipStates.get(ip)
   if (existing) {

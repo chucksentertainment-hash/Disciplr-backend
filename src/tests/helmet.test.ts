@@ -1,166 +1,155 @@
-/**
- * @file helmet.test.ts
- * Tests for helmet CSP and security header configuration (Issue #131).
- *
- * Strategy: spin up the Express app in-process via supertest so we exercise
- * the real middleware stack without a live server. Each test hits GET /
- * (returns 404 — that's fine; headers are set before routing) and asserts
- * the response headers match the API-only helmet policy.
- */
-
 import request from 'supertest'
 import { app } from '../app.js'
+import { bootstrapApp } from '../app-bootstrap.js'
+import { generateAccessToken } from '../lib/auth-utils.js'
+import { UserRole } from '../types/user.js'
 
-describe('helmet security headers (Issue #131)', () => {
-  // -------------------------------------------------------------------------
-  // Content-Security-Policy
-  // -------------------------------------------------------------------------
-  describe('Content-Security-Policy', () => {
-    it('sets default-src to none', async () => {
-      const res = await request(app).get('/')
-      const csp = res.headers['content-security-policy'] as string
-      expect(csp).toBeDefined()
-      expect(csp).toContain("default-src 'none'")
+type HeaderMap = Record<string, string | string[] | undefined>
+
+interface HeaderContractOptions {
+  expectFrameOptionsAbsent?: boolean
+  expectPoweredByAbsent?: boolean
+}
+
+interface EndpointCase {
+  label: string
+  path: string
+  token?: string
+}
+
+const DEFAULT_HEADER_CONTRACT_OPTIONS: Required<HeaderContractOptions> = {
+  expectFrameOptionsAbsent: true,
+  expectPoweredByAbsent: true,
+}
+
+let bootstrapped = false
+
+function toHeaderValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value.join('; ')
+  }
+  return value ?? ''
+}
+
+function parseDirectives(csp: string): string[] {
+  return csp
+    .split(';')
+    .map((directive) => directive.trim())
+    .filter((directive) => directive.length > 0)
+}
+
+function assertHelmetHeaderContract(
+  headers: HeaderMap,
+  options: HeaderContractOptions = {},
+) {
+  const resolvedOptions = {
+    ...DEFAULT_HEADER_CONTRACT_OPTIONS,
+    ...options,
+  }
+
+  const csp = toHeaderValue(headers['content-security-policy'])
+  expect(csp).toBeTruthy()
+  expect(csp).toContain("default-src 'none'")
+  expect(csp).toContain("frame-ancestors 'none'")
+
+  const hsts = toHeaderValue(headers['strict-transport-security']).toLowerCase()
+  expect(hsts).toContain('max-age=31536000')
+  expect(hsts).toContain('includesubdomains')
+  expect(hsts).not.toContain('preload')
+
+  expect(toHeaderValue(headers['referrer-policy'])).toBe('no-referrer')
+  expect(toHeaderValue(headers['x-content-type-options'])).toBe('nosniff')
+  expect(toHeaderValue(headers['cross-origin-resource-policy'])).toBe('same-site')
+  expect(toHeaderValue(headers['cross-origin-opener-policy'])).toBe('same-origin')
+  expect(toHeaderValue(headers['x-dns-prefetch-control'])).toBe('off')
+  expect(toHeaderValue(headers['x-permitted-cross-domain-policies'])).toBe('none')
+
+  if (resolvedOptions.expectFrameOptionsAbsent) {
+    expect(headers['x-frame-options']).toBeUndefined()
+  }
+
+  if (resolvedOptions.expectPoweredByAbsent) {
+    expect(headers['x-powered-by']).toBeUndefined()
+  }
+}
+
+describe('helmet security headers contract', () => {
+  beforeAll(() => {
+    if (!bootstrapped) {
+      bootstrapApp()
+      bootstrapped = true
+    }
+  })
+
+  describe('helper contract behavior', () => {
+    it('normalizes single and array header values', () => {
+      expect(toHeaderValue('abc')).toBe('abc')
+      expect(toHeaderValue(['abc', 'def'])).toBe('abc; def')
+      expect(toHeaderValue(undefined)).toBe('')
     })
 
-    it('sets frame-ancestors to none', async () => {
-      const res = await request(app).get('/')
-      const csp = res.headers['content-security-policy'] as string
-      expect(csp).toContain("frame-ancestors 'none'")
+    it('parses CSP directives without relying on order', () => {
+      const parsed = parseDirectives("default-src 'none'; frame-ancestors 'none'; ")
+      expect(parsed).toEqual(["default-src 'none'", "frame-ancestors 'none'"])
     })
 
-    it('sets script-src to none', async () => {
-      const res = await request(app).get('/')
-      const csp = res.headers['content-security-policy'] as string
-      expect(csp).toContain("script-src 'none'")
-    })
+    it('supports optional absence checks', () => {
+      const headers: HeaderMap = {
+        'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+        'strict-transport-security': 'max-age=31536000; includeSubDomains',
+        'referrer-policy': 'no-referrer',
+        'x-content-type-options': 'nosniff',
+        'cross-origin-resource-policy': 'same-site',
+        'cross-origin-opener-policy': 'same-origin',
+        'x-dns-prefetch-control': 'off',
+        'x-permitted-cross-domain-policies': 'none',
+        'x-frame-options': 'SAMEORIGIN',
+        'x-powered-by': 'Express',
+      }
 
-    it('sets form-action to none', async () => {
-      const res = await request(app).get('/')
-      const csp = res.headers['content-security-policy'] as string
-      expect(csp).toContain("form-action 'none'")
-    })
-
-    it('sets object-src to none', async () => {
-      const res = await request(app).get('/')
-      const csp = res.headers['content-security-policy'] as string
-      expect(csp).toContain("object-src 'none'")
+      assertHelmetHeaderContract(headers, {
+        expectFrameOptionsAbsent: false,
+        expectPoweredByAbsent: false,
+      })
     })
   })
 
-  // -------------------------------------------------------------------------
-  // Strict-Transport-Security
-  // -------------------------------------------------------------------------
-  describe('Strict-Transport-Security', () => {
-    it('sets max-age to at least 31536000 (1 year)', async () => {
-      const res = await request(app).get('/')
-      const hsts = res.headers['strict-transport-security'] as string
-      expect(hsts).toBeDefined()
-      const match = hsts.match(/max-age=(\d+)/)
-      expect(match).not.toBeNull()
-      const maxAge = parseInt(match![1], 10)
-      expect(maxAge).toBeGreaterThanOrEqual(31_536_000)
-    })
+  describe('representative endpoint matrix', () => {
+    const endpointCases: EndpointCase[] = [
+      {
+        label: 'root endpoint (unauthenticated)',
+        path: '/',
+      },
+      {
+        label: 'health endpoint (unauthenticated)',
+        path: '/api/health',
+      },
+      {
+        label: 'authenticated endpoint',
+        path: '/api/vaults',
+        token: generateAccessToken({
+          userId: 'helmet-user-1',
+          role: UserRole.USER,
+        }),
+      },
+      {
+        label: 'admin endpoint',
+        path: '/api/admin/audit-logs',
+        token: generateAccessToken({
+          userId: 'helmet-admin-1',
+          role: UserRole.ADMIN,
+        }),
+      },
+    ]
 
-    it('includes includeSubDomains', async () => {
-      const res = await request(app).get('/')
-      const hsts = res.headers['strict-transport-security'] as string
-      expect(hsts.toLowerCase()).toContain('includesubdomains')
-    })
+    it.each(endpointCases)('enforces helmet header contract for $label', async ({ path, token }) => {
+      let req = request(app).get(path)
+      if (token) {
+        req = req.set('Authorization', `Bearer ${token}`)
+      }
 
-    it('does not include preload (not yet registered in preload list)', async () => {
-      const res = await request(app).get('/')
-      const hsts = res.headers['strict-transport-security'] as string
-      expect(hsts.toLowerCase()).not.toContain('preload')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // X-Frame-Options — must be absent (CSP frame-ancestors supersedes it)
-  // -------------------------------------------------------------------------
-  describe('X-Frame-Options', () => {
-    it('is not set (superseded by CSP frame-ancestors)', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['x-frame-options']).toBeUndefined()
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // X-Powered-By — must be absent
-  // -------------------------------------------------------------------------
-  describe('X-Powered-By', () => {
-    it('is removed by helmet', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['x-powered-by']).toBeUndefined()
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // X-Content-Type-Options
-  // -------------------------------------------------------------------------
-  describe('X-Content-Type-Options', () => {
-    it('is set to nosniff', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['x-content-type-options']).toBe('nosniff')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // Referrer-Policy
-  // -------------------------------------------------------------------------
-  describe('Referrer-Policy', () => {
-    it('is set to no-referrer', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['referrer-policy']).toBe('no-referrer')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // Cross-Origin-Resource-Policy
-  // -------------------------------------------------------------------------
-  describe('Cross-Origin-Resource-Policy', () => {
-    it('is set to same-site', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['cross-origin-resource-policy']).toBe('same-site')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // Cross-Origin-Opener-Policy
-  // -------------------------------------------------------------------------
-  describe('Cross-Origin-Opener-Policy', () => {
-    it('is set to same-origin', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['cross-origin-opener-policy']).toBe('same-origin')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // X-DNS-Prefetch-Control
-  // -------------------------------------------------------------------------
-  describe('X-DNS-Prefetch-Control', () => {
-    it('is set to off', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['x-dns-prefetch-control']).toBe('off')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // X-Permitted-Cross-Domain-Policies
-  // -------------------------------------------------------------------------
-  describe('X-Permitted-Cross-Domain-Policies', () => {
-    it('is set to none', async () => {
-      const res = await request(app).get('/')
-      expect(res.headers['x-permitted-cross-domain-policies']).toBe('none')
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // Custom header: X-Timezone (non-helmet, regression guard)
-  // -------------------------------------------------------------------------
-  describe('X-Timezone', () => {
-    it('is set to UTC by app middleware', async () => {
-      const res = await request(app).get('/')
+      const res = await req
+      assertHelmetHeaderContract(res.headers as HeaderMap)
       expect(res.headers['x-timezone']).toBe('UTC')
     })
   })

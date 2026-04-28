@@ -1,6 +1,6 @@
 import request from 'supertest'
 import { app } from '../app.js'
-import { describe, it, expect, beforeEach } from '@jest/globals'
+import { describe, it, expect, beforeEach, jest } from '@jest/globals'
 import { UserRole } from '../types/user.js'
 import { vaults, setVaults, type Vault } from '../routes/vaults.js'
 import { resetMilestonesTable, createMilestone, verifyMilestone } from '../services/milestones.js'
@@ -231,6 +231,51 @@ describe('checkExpiredVaults', () => {
 
     const expired = checkExpiredVaults()
     expect(expired).toHaveLength(0)
+  })
+
+  it('does not fail a vault just before its UTC deadline', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-04-25T12:00:00.000Z'))
+    const v = makeVault({ endTimestamp: '2026-04-25T12:00:00.001Z' })
+    vaults.push(v)
+
+    expect(checkExpiredVaults()).toEqual([])
+    expect(v.status).toBe('active')
+    jest.useRealTimers()
+  })
+
+  it('fails a vault exactly at its UTC deadline', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-04-25T12:00:00.000Z'))
+    const v = makeVault({ endTimestamp: '2026-04-25T12:00:00.000Z' })
+    vaults.push(v)
+
+    expect(checkExpiredVaults()).toEqual([v.id])
+    expect(v.status).toBe('failed')
+    jest.useRealTimers()
+  })
+
+  it('fails a vault just after its UTC deadline', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-04-25T12:00:00.000Z'))
+    const v = makeVault({ endTimestamp: '2026-04-25T11:59:59.999Z' })
+    vaults.push(v)
+
+    expect(checkExpiredVaults()).toEqual([v.id])
+    expect(v.status).toBe('failed')
+    jest.useRealTimers()
+  })
+
+  it('does not return duplicate expirations on repeated checks', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-04-25T12:00:00.000Z'))
+    const v = makeVault({ endTimestamp: '2026-04-25T12:00:00.000Z' })
+    vaults.push(v)
+
+    expect(checkExpiredVaults()).toEqual([v.id])
+    expect(checkExpiredVaults()).toEqual([])
+    expect(v.status).toBe('failed')
+    jest.useRealTimers()
   })
 })
 

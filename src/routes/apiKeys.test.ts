@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, test } from 'node:test'
-import { app } from '../app.js'
+import express from 'express'
+import { analyticsRouter } from './analytics.js'
+import { apiKeysRouter } from './apiKeys.js'
 import { resetApiKeysTable } from '../services/apiKeys.js'
 
 let baseUrl = ''
-let server: ReturnType<typeof app.listen> | null = null
+let server: ReturnType<express.Express['listen']> | null = null
 
 beforeEach(async () => {
   resetApiKeysTable()
+  const app = express()
+  app.use(express.json())
+  app.use('/api/api-keys', apiKeysRouter)
+  app.use('/api/analytics', analyticsRouter)
   server = app.listen(0)
   await new Promise<void>((resolve) => {
     server!.once('listening', () => resolve())
@@ -132,5 +138,32 @@ test('validates scopes and rejects revoked API keys on protected analytics route
     },
   })
   assert.equal(revokedResponse.status, 401)
-}
-)
+})
+
+test('returns structured validation errors for invalid API key create payloads', async () => {
+  const response = await fetch(`${baseUrl}/api/api-keys`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-user-id': 'user-456',
+    },
+    body: JSON.stringify({
+      label: '   ',
+      scopes: ['read:vaults', ''],
+    }),
+  })
+
+  assert.equal(response.status, 400)
+  const body = (await response.json()) as {
+    error: {
+      code: string
+      message: string
+      fields: Array<{ path: string; message: string; code: string }>
+    }
+  }
+
+  assert.equal(body.error.code, 'VALIDATION_ERROR')
+  assert.equal(body.error.message, 'Invalid request payload')
+  assert.equal(body.error.fields.some((field) => field.path === 'label'), true)
+  assert.equal(body.error.fields.some((field) => field.path === 'scopes[1]'), true)
+})

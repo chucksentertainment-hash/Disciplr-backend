@@ -38,6 +38,7 @@ model User {
   lastLoginAt   DateTime?
   deletedAt     DateTime?
   vaults        Vault[]
+  notifications Notification[]
   refreshTokens RefreshToken[]
 
   @@index([deletedAt])
@@ -71,4 +72,24 @@ model Vault {
   @@index([status])
   @@index([endDate])
   @@map("vaults")
+}
+
+model Notification {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String
+  title          String
+  message        String
+  data           Json?
+  idempotencyKey String?   @map("idempotency_key")
+  readAt         DateTime? @map("read_at")
+  archivedAt     DateTime? @map("archived_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([readAt])
+  @@index([userId, archivedAt, createdAt])
+  @@unique([userId, idempotencyKey])
+  @@map("notifications")
 }

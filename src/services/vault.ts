@@ -6,7 +6,7 @@ export interface VaultRecord {
   creator: string
   amount: string
   start_timestamp: string
-  end_timestamp: string
+  end_date: string
   success_destination: string
   failure_destination: string
   status: 'active' | 'completed' | 'failed' | 'cancelled'
@@ -20,7 +20,7 @@ export const createVault = async (data: Partial<VaultRecord>): Promise<VaultReco
       creator: data.creator,
       amount: data.amount,
       start_timestamp: data.start_timestamp,
-      end_timestamp: data.end_timestamp,
+      end_date: data.end_date,
       success_destination: data.success_destination,
       failure_destination: data.failure_destination,
       status: data.status || 'active',
@@ -51,12 +51,18 @@ export const getVaultById = async (id: string): Promise<VaultRecord | null> => {
  * Finds active vaults past their deadline and marks them as failed.
  * Creates notifications for the creators.
  */
-export const markVaultExpiries = async (): Promise<number> => {
-  const now = new Date().toISOString()
+export const markVaultExpiries = async (opts: { now?: Date; limit?: number } = {}): Promise<number> => {
+  const now = (opts.now ?? new Date()).toISOString()
   
-  const expiredVaults = await db('vaults')
+  const query = db('vaults')
     .where('status', 'active')
-    .andWhere('end_timestamp', '<', now)
+    .andWhere('end_date', '<=', now)
+
+  if (opts.limit) {
+    query.limit(opts.limit)
+  }
+
+  const expiredVaults = await query
     .select('*')
     
   if (expiredVaults.length === 0) return 0
@@ -65,6 +71,7 @@ export const markVaultExpiries = async (): Promise<number> => {
   
   await db('vaults')
     .whereIn('id', expiredIds)
+    .where('status', 'active')
     .update({ status: 'failed' })
     
   // Create notifications for each expired vault
@@ -73,7 +80,7 @@ export const markVaultExpiries = async (): Promise<number> => {
       user_id: vault.creator,
       type: 'vault_failure',
       title: 'Vault Deadline Reached',
-      message: `Vault ${vault.id} has expired and been marked as failed.`,
+      message: 'A vault in your account has expired and been marked as failed.',
       data: { vaultId: vault.id }
     })
   }

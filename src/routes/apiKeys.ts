@@ -1,10 +1,19 @@
 import { Router } from 'express'
+import { z } from 'zod'
 import { requireUserAuth } from '../middleware/userAuth.js'
+import { apiKeyRateLimiter } from '../middleware/rateLimiter.js'
 import { createApiKey, listApiKeysForUser, revokeApiKey } from '../services/apiKeys.js'
+import { formatValidationError } from '../lib/validation.js'
 
 export const apiKeysRouter = Router()
 
 apiKeysRouter.use(requireUserAuth)
+
+const createApiKeySchema = z.object({
+  label: z.string().trim().min(1, 'label is required.'),
+  scopes: z.array(z.string().trim().min(1, 'scope must be a non-empty string.')),
+  orgId: z.string().trim().optional(),
+})
 
 apiKeysRouter.get('/', (req, res) => {
   const userId = req.authUser!.userId
@@ -13,33 +22,21 @@ apiKeysRouter.get('/', (req, res) => {
   res.json({ apiKeys })
 })
 
-apiKeysRouter.post('/', (req, res) => {
+apiKeysRouter.post('/', apiKeyRateLimiter, (req, res) => {
   const userId = req.authUser!.userId
-  const { label, scopes, orgId } = req.body as {
-    label?: string
-    scopes?: unknown
-    orgId?: string
-  }
-
-  if (!label?.trim()) {
-    res.status(400).json({ error: 'label is required.' })
+  const parseResult = createApiKeySchema.safeParse(req.body)
+  if (!parseResult.success) {
+    res.status(400).json(formatValidationError(parseResult.error))
     return
   }
 
-  if (!Array.isArray(scopes)) {
-    res.status(400).json({ error: 'scopes must be an array of scope strings.' })
-    return
-  }
-
-  const normalizedScopes = scopes
-    .map((scope) => (typeof scope === 'string' ? scope.trim() : ''))
-    .filter(Boolean)
+  const { label, scopes, orgId } = parseResult.data
 
   const { apiKey, record } = createApiKey({
     userId,
     orgId: orgId?.trim() || undefined,
-    label: label.trim(),
-    scopes: normalizedScopes,
+    label,
+    scopes,
   })
 
   const { keyHash: _keyHash, ...publicRecord } = record

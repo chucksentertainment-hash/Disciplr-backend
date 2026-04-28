@@ -19,6 +19,7 @@ export class BackgroundJobSystem {
   private readonly queue: InMemoryJobQueue
   private readonly scheduleTimers: NodeJS.Timeout[] = []
   private started = false
+  private shuttingDown = false
 
   constructor() {
     this.queue = new InMemoryJobQueue({
@@ -39,11 +40,13 @@ export class BackgroundJobSystem {
     }
 
     this.started = true
+    this.shuttingDown = false
     this.queue.start()
     this.scheduleRecurringJobs()
   }
 
   async stop(): Promise<void> {
+    this.shuttingDown = true
     for (const timer of this.scheduleTimers) {
       clearInterval(timer)
     }
@@ -57,6 +60,9 @@ export class BackgroundJobSystem {
     payload: JobPayloadByType[JobType],
     options: EnqueueOptions = {},
   ): QueuedJobReceipt<JobType> {
+    if (this.shuttingDown) {
+      throw new Error('Cannot enqueue job: system is shutting down')
+    }
     return this.queue.enqueue(type, payload, options)
   }
 

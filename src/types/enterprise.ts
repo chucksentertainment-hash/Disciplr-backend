@@ -30,3 +30,24 @@ export interface EnterpriseMilestone {
 }
 
 export type EnterpriseResponse<T> = T | { data: T };
+
+// ─── MEMBERSHIP TYPES (FIXED) ────────────────────────────────────────────────
+
+export type MembershipRole = 'owner' | 'admin' | 'member';
+
+export type Membership = {
+  id: string;
+  user_id: string;
+  organization_id: string;
+  team_id: string | null;
+  role: MembershipRole;
+  created_at?: Date;
+  updated_at?: Date;
+};
+
+export type CreateMembershipInput = {
+  user_id: string;
+  organization_id: string;
+  team_id?: string | null;
+  role?: MembershipRole;
+};
