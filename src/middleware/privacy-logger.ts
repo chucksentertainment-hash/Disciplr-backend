@@ -23,28 +23,46 @@ export function shouldRedact(key: string): boolean {
     return SENSITIVE_FIELDS.has(key.toLowerCase())
 }
 
-export function redact(value: any): any {
+export function redact(value: any, seen = new WeakSet()): any {
     if (value === null || value === undefined) {
         return value
     }
     
+    // Primitive values
+    if (typeof value !== 'object') {
+        return value
+    }
+
+    // Circular reference check
+    if (seen.has(value)) {
+        return '[Circular]'
+    }
+    seen.add(value)
+    
     if (Array.isArray(value)) {
-        return value.map(item => redact(item))
+        return value.map(item => redact(item, seen))
+    }
+
+    // Handle common objects that are not plain objects
+    if (value instanceof Date) {
+        return value.toISOString()
+    }
+    if (value instanceof RegExp) {
+        return value.toString()
+    }
+    if (Buffer.isBuffer(value)) {
+        return '[Buffer]'
     }
     
-    if (typeof value === 'object') {
-        const result: Record<string, any> = {}
-        for (const [k, v] of Object.entries(value)) {
-            if (shouldRedact(k)) {
-                result[k] = '***REDACTED***'
-            } else {
-                result[k] = redact(v)
-            }
+    const result: Record<string, any> = {}
+    for (const [k, v] of Object.entries(value)) {
+        if (shouldRedact(k)) {
+            result[k] = '***REDACTED***'
+        } else {
+            result[k] = redact(v, seen)
         }
-        return result
     }
-    
-    return value
+    return result
 }
 
 /**

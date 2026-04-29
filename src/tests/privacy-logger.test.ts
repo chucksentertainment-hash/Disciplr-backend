@@ -76,6 +76,39 @@ describe('Privacy Logger', () => {
             expect(shouldRedact('token')).toBe(true)
             expect(shouldRedact('userId')).toBe(false)
         })
+        it('should handle Date, RegExp, and Buffer objects correctly', () => {
+            const date = new Date('2025-01-01T00:00:00Z')
+            const regex = /test/i
+            const buffer = Buffer.from('test')
+
+            const payload = {
+                date,
+                regex,
+                buffer,
+                email: 'test@example.com'
+            }
+            
+            const expected = {
+                date: date.toISOString(),
+                regex: regex.toString(),
+                buffer: '[Buffer]',
+                email: '***REDACTED***'
+            }
+            expect(redact(payload)).toEqual(expected)
+        })
+
+        it('should handle circular references without stack overflow', () => {
+            const payload: any = {
+                email: 'test@example.com'
+            }
+            payload.self = payload
+            
+            const expected = {
+                email: '***REDACTED***',
+                self: '[Circular]'
+            }
+            expect(redact(payload)).toEqual(expected)
+        })
     })
 
     describe('IP Masking', () => {
@@ -130,6 +163,25 @@ describe('Privacy Logger', () => {
             expect(logMsg).not.toContain('Bearer 1234')
             expect(logMsg).toContain('Bob')
             expect(logMsg).toContain('jest')
+        })
+        
+        it('should ensure regression against PII leakage in logs', () => {
+            req.body = { 
+                apiKey: 'super_secret_key_123', 
+                nested: { token: 'hidden_token', user_email: 'safe@test.com' } 
+            }
+            req.headers = { 'x-api-key': 'header_secret_key' }
+            
+            privacyLogger(req as Request, res as Response, next)
+            
+            const logCalls = (console.log as jest.Mock).mock.calls
+            const logMsg = logCalls[0][0]
+            
+            // Regression test: absolutely no sensitive strings should be present
+            expect(logMsg).not.toMatch(/super_secret_key_123/)
+            expect(logMsg).not.toMatch(/hidden_token/)
+            expect(logMsg).not.toMatch(/header_secret_key/)
+            expect(logMsg).toContain('***REDACTED***')
         })
     })
 })

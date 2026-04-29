@@ -23,7 +23,7 @@ Any field containing the following keys (case-insensitive) will have its value r
 - `x-api-key` (Headers)
 
 ### Supported Data Structures
-The redaction engine is recursive and works across nested objects and arrays.
+The redaction engine is recursive and works safely across nested objects, arrays, and standard data structures. It includes built-in protection against circular references (to prevent stack overflows) and automatically serializes `Date`, `RegExp`, and `Buffer` objects without attempting to recursively parse their internal properties.
 
 ## Adding New Redactions
 To add new redactions, simply add the new field key to `SENSITIVE_FIELDS` in `src/middleware/privacy-logger.ts`.
