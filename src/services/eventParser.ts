@@ -223,7 +223,6 @@ function parseVaultPayload(
         console.error(`Vault status validation error: ${statusError}`)
         return null
       }
-      return payload
     }
 
     default:

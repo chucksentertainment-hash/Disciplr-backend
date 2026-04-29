@@ -28,16 +28,16 @@ export interface Vault {
   id: string
   creator: string
   amount: string
-  status: 'active' | 'completed' | 'failed' | 'cancelled'
+  status: 'draft' | 'active' | 'completed' | 'failed' | 'cancelled'
   startTimestamp: string
   endTimestamp: string
   successDestination: string
   failureDestination: string
+  verifier?: string
   createdAt: string
 }
 
 // GET /api/vaults
-
 vaultsRouter.get(
   '/',
   authenticate,
@@ -126,6 +126,7 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
 
 // ─── GET /api/vaults/:id ─────────────────────────────────────────────────────
 
+// GET /api/vaults/:id
 vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
   // Try DB-backed store first (falls back to in-memory automatically)
   try {
@@ -149,8 +150,7 @@ vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
   res.json(vault)
 })
 
-// ─── POST /api/vaults/:id/cancel ─────────────────────────────────────────────
-
+// POST /api/vaults/:id/cancel
 vaultsRouter.post('/:id/cancel', authenticate, async (req, res) => {
   const actorUserId = req.user!.userId
   const actorRole = req.user!.role

@@ -59,7 +59,7 @@ export const createVaultSchema = z
     amount: amountStringSchema,
     startDate: isoTimestampSchema,
     endDate: isoTimestampSchema,
-    verifier: stellarAddressSchema,
+    verifier: z.string({ error: 'required' }).min(1, 'is required'),
     destinations: z.object({
       success: stellarAddressSchema,
       failure: stellarAddressSchema,
