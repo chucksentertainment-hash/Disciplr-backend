@@ -223,6 +223,9 @@ function parseVaultPayload(
         console.error(`Vault status validation error: ${statusError}`)
         return null
       }
+      // Return the validated status payload. Previously this case fell through
+      // to `default` and returned null, so valid status events never parsed.
+      return payload
     }
 
     default:
