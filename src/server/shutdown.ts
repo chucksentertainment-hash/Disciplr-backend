@@ -1,6 +1,8 @@
 import type { Server } from 'node:http'
 import { BackgroundJobSystem } from '../jobs/system.js'
 import { ETLWorker } from '../services/etlWorker.js'
+import { getInFlightCount, setDraining } from '../middleware/inFlightRequests.js'
+import { getEnv } from '../config/index.js'
 
 export interface ShutdownOptions {
   server: Server
@@ -21,6 +23,12 @@ export interface ShutdownOptions {
 export function createShutdownHandler(options: ShutdownOptions) {
   const { server, jobSystem, etlWorker, closeDb } = options
   let shuttingDown = false
+  // Track open sockets so we can force-close them if the drain deadline expires
+  const sockets = new Set<any>()
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
 
   return async (signal: string): Promise<void> => {
     if (shuttingDown) {
@@ -34,6 +42,37 @@ export function createShutdownHandler(options: ShutdownOptions) {
       // 1. Stop ETL Worker
       console.log('[Shutdown] Stopping ETL worker...')
       await etlWorker.stop()
+
+      // 1.5 Enter HTTP drain mode: stop accepting new requests at middleware level
+      try {
+        const env = getEnv()
+        const drainMs = env.SHUTDOWN_DRAIN_MS ?? 30_000
+        console.log(`[Shutdown] Entering HTTP drain mode (waiting up to ${drainMs}ms for in-flight requests)`)
+        setDraining(true)
+
+        const start = Date.now()
+        while (getInFlightCount() > 0 && Date.now() - start < drainMs) {
+          // wait a short interval
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 100))
+        }
+
+        if (getInFlightCount() > 0) {
+          console.warn('[Shutdown] Drain deadline reached; forcing close of remaining connections')
+          for (const s of sockets) {
+            try {
+              s.destroy()
+            } catch (e) {
+              // ignore
+            }
+          }
+        } else {
+          console.log('[Shutdown] All in-flight requests completed')
+        }
+      } finally {
+        // leave draining mode so middleware behaves normally in tests after shutdown
+        setDraining(false)
+      }
 
       // 2. Stop Job System
       console.log('[Shutdown] Stopping background job system...')

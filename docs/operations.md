@@ -47,6 +47,7 @@ Database connection closed
 | `JOB_WORKER_CONCURRENCY` | 2 | Number of concurrent job workers. |
 | `JOB_QUEUE_POLL_INTERVAL_MS` | 250 | How often the job queue checks for new work. |
 | `JOB_HISTORY_LIMIT` | 50 | Number of completed/failed jobs to keep in memory metrics. |
+| `SHUTDOWN_DRAIN_MS` | 30000 | Milliseconds to wait for in-flight HTTP requests during shutdown drain. |
 
 ## Soroban Testnet Account Funding (Friendbot Precheck)
 

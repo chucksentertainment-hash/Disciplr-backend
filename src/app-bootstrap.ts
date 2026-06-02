@@ -27,6 +27,7 @@ import {
   securityMetricsMiddleware,
   securityRateLimitMiddleware,
 } from './security/abuse-monitor.js'
+import inFlightMiddleware from './middleware/inFlightRequests.js'
 
 export function bootstrapApp() {
   const jobSystem = new BackgroundJobSystem()
@@ -34,6 +35,8 @@ export function bootstrapApp() {
 
   app.use(securityMetricsMiddleware)
   app.use(securityRateLimitMiddleware)
+  // Track in-flight requests for graceful shutdown
+  app.use(inFlightMiddleware)
   app.use(withRequestPrisma)
 
   app.use('/api/health', healthRateLimiter, createHealthRouter(jobSystem))
