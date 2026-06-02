@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals'
-import type { CreateVaultInput, PersistedVault } from '../types/vaults.js'
+import type { CreateVaultInput, PersistedVault, StakeInput, StakeWithMemoInput } from '../types/vaults.js'
+import { MemoTooLongError } from '../types/vaults.js'
 import {
   buildVaultCreationPayload,
+  buildVaultStakePayload,
+  buildVaultStakeWithMemoPayload,
   getSorobanConfig,
   isSorobanSubmitEnabled,
+  MEMO_MAX_BYTES,
   setSorobanClient,
   resetSorobanClient,
   createDefaultSorobanClient,

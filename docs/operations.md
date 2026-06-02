@@ -39,6 +39,8 @@ Database connection closed
 
 ## Environment Variables
 
+All environment variables are validated at startup using `src/config/env.ts`. If any required variables are missing or incorrectly formatted, the application will exit with a fatal error.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | 3000 | The port the API listens on. |

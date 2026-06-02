@@ -4,6 +4,7 @@ export const JOB_TYPES = [
   'oracle.call',
   'analytics.recompute',
   'export.generate',
+  'sessions.cleanup',
 ] as const
 
 export type JobType = (typeof JOB_TYPES)[number]
@@ -36,12 +37,17 @@ export interface ExportGenerateJobPayload {
   exportJobId: string
 }
 
+export interface SessionsCleanupJobPayload {
+  batchSize?: number
+}
+
 export interface JobPayloadByType {
   'notification.send': NotificationJobPayload
   'deadline.check': DeadlineCheckJobPayload
   'oracle.call': OracleCallJobPayload
   'analytics.recompute': AnalyticsRecomputeJobPayload
   'export.generate': ExportGenerateJobPayload
+  'sessions.cleanup': SessionsCleanupJobPayload
 }
 
 export interface JobContext {
@@ -114,6 +120,8 @@ export const isPayloadForJobType = (
       )
     case 'export.generate':
       return isNonEmptyString(payload.exportJobId)
+    case 'sessions.cleanup':
+      return payload.batchSize === undefined || (typeof payload.batchSize === 'number' && payload.batchSize > 0)
     default:
       return false
   }

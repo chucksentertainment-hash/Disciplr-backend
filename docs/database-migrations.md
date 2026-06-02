@@ -15,6 +15,16 @@ This backend uses **Knex + PostgreSQL** for schema migrations.
 - Migration tracking table: `knex_migrations`
 - Connection source: `DATABASE_URL`
 
+## Migration ownership
+
+- **Owner**: Backend / Database team (Disciplr). For schema changes, open a PR targeting `db/migrations/` and request a review from `@Disciplr-Org/db`.
+
+## Legacy SQL migration cleanup
+
+The legacy SQL files under `src/db/migrations/` are deprecated and no longer authoritative. All required schema changes are now tracked in `db/migrations/`.
+
+The `db/migrations/20260501000000_create_api_keys_and_idempotency_keys.cjs` migration brings `api_keys` and `idempotency_keys` into the canonical Knex-managed migration flow.
+
 ## Baseline migration
 
 - Baseline file: `db/migrations/20260225190000_initial_baseline.cjs`
@@ -62,6 +72,7 @@ This repository includes a CI example at `.github/workflows/ci.yml` that:
 - starts PostgreSQL in GitHub Actions
 - runs `npm run migrate:latest`
 - verifies state with `npm run migrate:status`
+- asserts migrations are clean with no pending files after application
 
 Example deployment step:
 
@@ -89,6 +100,21 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - run: npm run build
 ```
+
+## Soroban contract CI coverage
+
+This repository also runs Soroban contract verification in CI through `.github/workflows/ci.yml`.
+
+The CI workflow now includes a separate `contracts` job that:
+
+- checks out the repository
+- sets up the Rust toolchain
+- caches the Cargo registry and the Soroban contract `target` artifacts
+- installs `cargo-contract`
+- builds `contracts/accountability_vault`
+- runs `cargo test` for `contracts/accountability_vault/src/test.rs`
+
+This keeps on-chain contract code verified alongside the existing Node/TypeScript suite.
 
 ## Rollback strategy
 

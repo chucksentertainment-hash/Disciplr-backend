@@ -7,6 +7,8 @@ import {
   verifyDownloadToken,
   type AuthenticatedRequest,
 } from '../middleware/auth.js'
+import { requireScopes } from '../middleware/apiKeyAuth.js'
+import { ApiScope } from '../types/auth.js'
 import {
   enqueueExportJob,
   getJob,
@@ -14,6 +16,29 @@ import {
   type ExportFormat,
   type ExportScope,
 } from '../services/exportQueue.js'
+import { checkAndIncrementExportQuota } from '../services/exportQuota.js'
+import { getEnv } from '../config/index.js'
+import { resolveS3Config, getExportSignedUrl } from '../services/exportS3.js'
+
+const resolveOrgId = (req: AuthenticatedRequest): string =>
+  (req as any).orgId as string | undefined ?? req.user!.userId
+
+const enforceExportQuota = async (
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<boolean> => {
+  const orgId = resolveOrgId(req)
+  const result = await checkAndIncrementExportQuota(orgId, getEnv().EXPORT_DAILY_QUOTA_LIMIT)
+  if (!result.allowed) {
+    res.setHeader('Retry-After', String(result.retryAfter))
+    res.status(429).json({
+      error: 'Export quota exceeded. Try again tomorrow.',
+      retryAfter: result.retryAfter,
+    })
+    return false
+  }
+  return true
+}
 
 export function createExportRouter(jobSystem: BackgroundJobSystem): Router {
   const router = Router()
@@ -38,12 +63,14 @@ export function createExportRouter(jobSystem: BackgroundJobSystem): Router {
     pollIntervalMs: 1000,
   })
 
-  router.post('/me', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/me', authenticate, requireScopes(ApiScope.ReadAnalytics, ApiScope.ReadVaults), async (req: AuthenticatedRequest, res: Response) => {
     const options = parseOptions(req)
     if (!options) {
       res.status(400).json({ error: 'Invalid format or scope parameter' })
       return
     }
+
+    if (!await enforceExportQuota(req, res)) return
 
     try {
       const job = await enqueueExportJob(jobSystem, {
@@ -66,12 +93,14 @@ export function createExportRouter(jobSystem: BackgroundJobSystem): Router {
     }
   })
 
-  router.post('/admin', authenticate, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/admin', authenticate, requireAdmin, requireScopes(ApiScope.ReadAnalytics, ApiScope.ReadVaults), async (req: AuthenticatedRequest, res: Response) => {
     const options = parseOptions(req)
     if (!options) {
       res.status(400).json({ error: 'Invalid format or scope parameter' })
       return
     }
+
+    if (!await enforceExportQuota(req, res)) return
 
     const targetUserId =
       typeof req.query.targetUserId === 'string' ? req.query.targetUserId : undefined
@@ -117,6 +146,22 @@ export function createExportRouter(jobSystem: BackgroundJobSystem): Router {
         attempts: job.attempts,
         maxAttempts: job.maxAttempts,
         ...(job.error ? { error: job.error } : {}),
+      })
+      return
+    }
+
+    const s3Config = resolveS3Config()
+
+    if (s3Config && job.s3Key) {
+      const signedUrl = await getExportSignedUrl(s3Config, job.s3Key)
+      res.json({
+        jobId: job.id,
+        status: 'done',
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        completedAt: job.completedAt,
+        downloadUrl: signedUrl,
+        expiresInSeconds: s3Config.signedUrlTtlSeconds,
       })
       return
     }

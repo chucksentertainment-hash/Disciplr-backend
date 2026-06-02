@@ -287,7 +287,7 @@ The `SorobanClient` provides the following methods to drive the full vault lifec
 |---|---|---|
 | `submitVaultCreation` | `vaultId`, `amount`, `verifier`, `successDestination`, `failureDestination`, `milestones` | Creates a new accountability vault |
 | `submitStake` | `vaultId`, `amount` | Stakes tokens into an existing vault |
-| `submitCheckIn` | `vaultId`, `milestoneId` | Records completion of a milestone |
+| `submitCheckIn` | `vaultId`, `milestoneId`, `evidenceHash` | Records completion of a milestone with a 32-byte evidence hash |
 | `submitSlash` | `vaultId`, `milestoneId` | Slashes funds for missed milestone |
 | `submitClaim` | `vaultId` | Claims released funds from completed vault |
 | `submitWithdraw` | `vaultId` | Withdraws remaining funds |

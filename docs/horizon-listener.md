@@ -88,7 +88,7 @@ All settings are validated at startup by `src/config/env.ts` (fail-fast with str
 node dist/services/horizonListenerMain.js
 ```
 
-Or via `ts-node`/`tsx` in development:
+Or via `tsx` in development:
 
 ```bash
 tsx src/services/horizonListenerMain.ts

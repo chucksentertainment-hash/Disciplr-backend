@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { stringify as csvStringify } from 'csv-stringify/sync'
 import type { Knex } from 'knex'
 import type { BackgroundJobSystem } from '../jobs/system.js'
+import { resolveS3Config, uploadToS3 } from './exportS3.js'
 
 export type ExportFormat = 'csv' | 'json'
 export type ExportScope = 'vaults' | 'transactions' | 'analytics' | 'all'
@@ -20,6 +21,7 @@ export interface ExportJob {
   error?: string
   result?: Buffer
   filename?: string
+  s3Key?: string
   attempts: number
   maxAttempts: number
   idempotencyKey?: string
@@ -49,6 +51,7 @@ interface ExportJobRecord {
   error: string | null
   result_data: Buffer | null
   filename: string | null
+  s3_key: string | null
   attempts: number
   max_attempts: number
   idempotency_key: string | null
@@ -172,6 +175,7 @@ const toExportJob = (record: ExportJobRecord): ExportJob => ({
   error: record.error ?? undefined,
   result: record.result_data ?? undefined,
   filename: record.filename ?? undefined,
+  s3Key: record.s3_key ?? undefined,
   attempts: record.attempts,
   maxAttempts: record.max_attempts,
   idempotencyKey: record.idempotency_key ?? undefined,
@@ -191,6 +195,7 @@ const toRecord = (job: ExportJob): ExportJobRecord => ({
   error: job.error ?? null,
   result_data: job.result ?? null,
   filename: job.filename ?? null,
+  s3_key: job.s3Key ?? null,
   attempts: job.attempts,
   max_attempts: job.maxAttempts,
   idempotency_key: job.idempotencyKey ?? null,
@@ -560,14 +565,27 @@ export async function processJob(
       : await buildExportDataFromDatabase(job.scope, scopedUserId)
     const { buffer, filename } = serializeExportData(data, job.format)
 
+    const s3Config = resolveS3Config()
+    let resultBuffer: Buffer | undefined = buffer
+    let s3Key: string | undefined
+
+    if (s3Config) {
+      const key = `exports/${job.id}/${filename}`
+      const contentType = job.format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8'
+      await uploadToS3(s3Config, key, buffer, contentType)
+      s3Key = key
+      resultBuffer = undefined // don't store bytes in DB when on S3
+    }
+
     await exportJobRepository.update({
       ...job,
       status: 'done',
       attempts: nextAttempt,
       completedAt: new Date().toISOString(),
       error: undefined,
-      result: buffer,
+      result: resultBuffer,
       filename,
+      s3Key,
     })
 
     console.info(
@@ -579,6 +597,7 @@ export async function processJob(
         scope: job.scope,
         attempt: nextAttempt,
         bytes: buffer.length,
+        s3: s3Key ? true : false,
         completedAt: new Date().toISOString(),
       }),
     )

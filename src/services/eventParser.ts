@@ -451,6 +451,41 @@ function routeToPayloadParser(
 }
 
 /**
+ * Topic-to-event-type mapping for accountability_vault contract events.
+ *
+ * ## Symbol topic scheme
+ *
+ * All event topics emitted by the `accountability_vault` contract are
+ * `soroban_sdk::Symbol` values (not `String`).  When decoded from XDR via
+ * `scValToNative` they become plain JavaScript strings, so the mapping below
+ * works transparently for both on-chain and off-chain consumers.
+ *
+ * Short topics (≤ 9 chars) use `symbol_short!` on the Rust side; longer
+ * topics use `Symbol::new`.  The decoded string value is identical either way.
+ *
+ * Contract → parser topic mapping
+ * ─────────────────────────────────────────────────────────────────────────────
+ * On-chain Symbol topic       Parser EventType (or handled inline)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * vault_created               vault_created
+ * vault_staked                vault_staked        (informational, no DB write)
+ * milestone_checked_in        milestone_checked_in (informational)
+ * deadline_extended           deadline_extended   (informational)
+ * vault_slashed               vault_failed
+ * vault_completed             vault_completed
+ * vault_cancelled             vault_cancelled
+ * vault_withdrawn             vault_cancelled     (withdrawal = cancelled state)
+ * vault_paused                vault_paused        (informational)
+ * vault_unpaused              vault_unpaused      (informational)
+ * milestone_claimed           milestone_created   (partial-release, informational)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Sources for check_in `source` topic:
+ *   symbol_short!("oracle")    → "oracle"
+ *   symbol_short!("verifier")  → "verifier"
+ */
+
+/**
  * Parses a Horizon event and extracts metadata and payload
  * 
  * @param rawEvent - Raw event from Horizon API
@@ -506,23 +541,50 @@ export function parseHorizonEvent(rawEvent: HorizonEvent): ParseResult {
       }
     }
 
-    const eventType = rawEvent.topic[0] as EventType
+    // Normalise contract Symbol topics to the canonical EventType used by the
+    // parser.  Symbol values decoded from XDR are plain strings, so this map
+    // covers both the new Symbol-topic contract and any legacy String-topic
+    // events still in the event stream.
+    const TOPIC_ALIAS: Record<string, EventType> = {
+      // Direct pass-throughs
+      vault_created:           'vault_created',
+      vault_completed:         'vault_completed',
+      vault_cancelled:         'vault_cancelled',
+      milestone_created:       'milestone_created',
+      milestone_validated:     'milestone_validated',
+      settlement_summary:      'settlement_summary',
+      // Aliases: contract emits these Symbol topics → mapped EventType
+      vault_slashed:           'vault_failed',    // slash = failure destination
+      vault_withdrawn:         'vault_cancelled', // withdraw = cancelled state
+      vault_failed:            'vault_failed',    // explicit legacy alias
+    }
 
-    // Validate event type
-    const validEventTypes: EventType[] = [
-      'vault_created',
-      'vault_completed',
-      'vault_failed',
-      'vault_cancelled',
-      'milestone_created',
-      'milestone_validated'
-    ]
+    const rawTopic = rawEvent.topic[0]
+    const eventType: EventType | undefined = TOPIC_ALIAS[rawTopic] as EventType | undefined
 
-    if (!validEventTypes.includes(eventType)) {
+    // Informational-only topics that do not map to a DB-persisted EventType are
+    // acknowledged and silently skipped rather than returned as parse errors.
+    const INFORMATIONAL_TOPICS = new Set([
+      'vault_staked',
+      'milestone_checked_in',
+      'deadline_extended',
+      'vault_paused',
+      'vault_unpaused',
+      'milestone_claimed',
+    ])
+
+    if (!eventType) {
+      if (INFORMATIONAL_TOPICS.has(rawTopic)) {
+        return {
+          success: false,
+          error: `Informational topic skipped: ${rawTopic}`,
+          details: { rawTopic }
+        }
+      }
       return {
         success: false,
-        error: `Unknown event type: ${eventType}`,
-        details: { eventType, validTypes: validEventTypes }
+        error: `Unknown event type: ${rawTopic}`,
+        details: { eventType: rawTopic, validTypes: Object.keys(TOPIC_ALIAS) }
       }
     }
 

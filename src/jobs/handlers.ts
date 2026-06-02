@@ -2,6 +2,7 @@ import { NotificationService } from '../services/notifications/factory.js'
 import { processJob as processExportJob } from '../services/exportQueue.js'
 import type { JobHandler, JobType } from './types.js'
 import { markVaultExpiries } from '../services/vaultExpiry.service.js'
+import { cleanupExpiredSessions } from '../services/session.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -17,13 +18,12 @@ const logJob = (type: JobType, message: string): void => {
   console.log(`[jobs:${type}] ${message}`)
 }
 
-export const defaultJobHandlers: JobHandlerRegistry = {
+export const createDefaultJobHandlers = (
+  notificationService: NotificationService,
+): JobHandlerRegistry => ({
   'notification.send': async (payload, context) => {
-    await NotificationService.send(payload.recipient, payload.subject, payload.body)
-    logJob(
-      'notification.send',
-      `executed job_id=${context.jobId} attempt=${context.attempt}`,
-    )
+    await notificationService.send(payload.recipient, payload.subject, payload.body)
+    logJob('notification.send', `executed job_id=${context.jobId} attempt=${context.attempt}`)
   },
   'deadline.check': async (payload, context) => {
     await sleep(30)
@@ -64,6 +64,14 @@ export const defaultJobHandlers: JobHandlerRegistry = {
     logJob(
       'export.generate',
       `exportJobId=${payload.exportJobId} attempt=${context.attempt}`,
+    )
+  },
+  'sessions.cleanup': async (payload, context) => {
+    const batchSize = payload.batchSize ?? 1000
+    const deleted = await cleanupExpiredSessions(batchSize)
+    logJob(
+      'sessions.cleanup',
+      `deleted=${deleted} batchSize=${batchSize} attempt=${context.attempt}`,
     )
   },
 }

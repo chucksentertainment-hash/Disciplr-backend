@@ -134,3 +134,23 @@ export const createVaultSchema = z
   })
 
 export type ParsedCreateVaultInput = z.infer<typeof createVaultSchema>
+
+/**
+ * Lazy-check whether a string is a valid Stellar ed25519 public key (G... address).
+ * Uses `@stellar/stellar-sdk` StrKey.isValidEd25519PublicKey but imports the
+ * library dynamically so cold-start cost is minimised.
+ */
+export async function isValidStellarAddress(address: string): Promise<boolean> {
+  if (typeof address !== 'string') return false
+  // Quick regex check first to avoid importing the SDK for obvious failures
+  if (!STELLAR_ADDRESS_RE.test(address)) return false
+
+  try {
+    const mod = await import('@stellar/stellar-sdk')
+    // StrKey.isValidEd25519PublicKey is the canonical checksum+format check
+    return Boolean(mod?.StrKey?.isValidEd25519PublicKey?.(address))
+  } catch (err) {
+    // If the import fails for any reason, conservatively treat as invalid.
+    return false
+  }
+}

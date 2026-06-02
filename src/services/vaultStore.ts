@@ -427,6 +427,26 @@ export const getVaultRevisionById = async (
   return result.rows[0].revision;
 };
 
+/**
+ * Computes a weak ETag for a vault based on its revision.
+ * The ETag is derived from the optimistic-concurrency version column (PostgreSQL xmin or memory counter).
+ * Weak ETags are used because vault representations may be transformed during transmission.
+ *
+ * @param id - Vault ID
+ * @returns Weak ETag string in format W/"-<version>" or null if vault not found
+ * @example
+ *   getVaultETag('vault-123') // Returns: W/"-456789" (where 456789 is the xmin value)
+ */
+export const getVaultETag = async (id: string): Promise<string | null> => {
+  const revision = await getVaultRevisionById(id);
+  if (!revision) {
+    return null;
+  }
+  // Import at function level to avoid circular dependencies
+  const { computeWeakETag } = await import("../utils/etag.js");
+  return computeWeakETag(revision);
+};
+
 export type CancelVaultResult =
   | {
       error: "not_found" | "already_cancelled" | "not_cancellable";

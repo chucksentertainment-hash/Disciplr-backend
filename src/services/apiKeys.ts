@@ -1,15 +1,15 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Pool } from 'pg'
-import type { ApiKeyAuthContext, ApiKeyRecord } from '../types/auth.js'
-import argon2 from 'argon2'
+import type { ApiKeyAuthContext, ApiKeyRecord, ApiScope } from '../types/auth.js'
 import { utcNow } from '../utils/timestamps.js'
 import { getPgPool } from '../db/pool.js'
+import * as argon2 from 'argon2'
 
 interface CreateApiKeyInput {
   userId?: string
   orgId?: string
   label: string
-  scopes: string[]
+  scopes: ApiScope[]
 }
 
 interface RotateApiKeyInput {
@@ -388,7 +388,7 @@ export const rotateApiKey = async (
 
 export const validateApiKey = async (
   apiKey: string,
-  requiredScopes: string[] = [],
+  requiredScopes: ApiScope[] = [],
 ): Promise<ApiKeyValidationResult> => {
   const parsed = parseApiKey(apiKey)
   if (!parsed) {
@@ -406,7 +406,7 @@ export const validateApiKey = async (
     return { valid: false, reason: 'revoked' }
   }
 
-  const normalizedRequiredScopes = normalizeScopes(requiredScopes)
+  const normalizedRequiredScopes = normalizeScopes(requiredScopes as unknown as string[])
   const missingScope = normalizedRequiredScopes.find((scope) => !record.scopes.includes(scope))
   if (missingScope) {
     return { valid: false, reason: 'forbidden' }

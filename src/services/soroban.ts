@@ -260,13 +260,18 @@ export const createDefaultSorobanClient = (
   },
 
   async submitCheckIn(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal, xdr } = await import('@stellar/stellar-sdk')
+    // evidence_hash is a 32-byte Buffer encoded as hex string from the backend.
+    const hashHex = args.evidenceHash as string
+    const hashBytes = Buffer.from(hashHex, 'hex')
+    const evidenceHashScVal = xdr.ScVal.scvBytes(hashBytes)
     return submitTransaction(
       config,
       'check_in',
       [
         nativeToScVal(args.vaultId, { type: 'string' }),
         nativeToScVal(args.milestoneId, { type: 'string' }),
+        evidenceHashScVal,
       ],
     )
   },
@@ -313,6 +318,113 @@ export const setSorobanClient = (client: SorobanClient): void => {
 
 export const resetSorobanClient = (): void => {
   _client = defaultSorobanClient
+}
+
+/**
+ * Builds the on-chain payload for staking into a vault.
+ * Mirrors the same idempotent pattern as `buildVaultCreationPayload`:
+ * repeated calls with the same input produce identical payloads.
+ *
+ * Feature-flagged: real submission only occurs when Soroban env vars
+ * are fully configured.
+ */
+export const buildVaultStakePayload = async (
+  input: StakeInput,
+): Promise<StakeResponse> => {
+  const mode = input.onChain?.mode ?? 'build'
+  const payload = buildStakePayload(input)
+
+  if (mode !== 'submit') {
+    return {
+      mode,
+      payload,
+      submission: { attempted: false, status: 'not_requested' },
+    }
+  }
+
+  const config = getSorobanConfig()
+  if (!config) {
+    log('warn', 'soroban.submit_not_configured', { vaultId: input.vaultId })
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.submit_start', { vaultId: input.vaultId })
+    const { txHash } = await _client.submitStake(config, payload.args)
+    log('info', 'soroban.submit_success', { vaultId: input.vaultId, txHash })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown submission error'
+    log('error', 'soroban.submit_error', { vaultId: input.vaultId, error: message })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Builds the on-chain payload for staking with an optional memo.
+ * The memo is a hex-encoded Bytes payload bound to the vault funding
+ * event for off-chain correlation (e.g. tx idempotency key).
+ *
+ * Throws MemoTooLongError if the decoded memo exceeds MEMO_MAX_BYTES.
+ */
+export const buildVaultStakeWithMemoPayload = async (
+  input: StakeWithMemoInput,
+): Promise<StakeWithMemoResponse> => {
+  const mode = input.onChain?.mode ?? 'build'
+  const payload = buildStakeWithMemoPayload(input)
+
+  if (mode !== 'submit') {
+    return {
+      mode,
+      payload,
+      submission: { attempted: false, status: 'not_requested' },
+    }
+  }
+
+  const config = getSorobanConfig()
+  if (!config) {
+    log('warn', 'soroban.submit_not_configured', { vaultId: input.vaultId })
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.submit_start', { vaultId: input.vaultId })
+    const { txHash } = await _client.submitStakeWithMemo(config, payload.args)
+    log('info', 'soroban.submit_success', { vaultId: input.vaultId, txHash })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown submission error'
+    log('error', 'soroban.submit_error', { vaultId: input.vaultId, error: message })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
 }
 
 // ─── Structured logging helper (no PII) ─────────────────────────────────────
@@ -493,14 +605,18 @@ export const submitStake = async (
 
 /**
  * Submit a check-in transaction for a vault milestone.
+ * `evidenceHash` is a 64-character lowercase hex string (SHA-256 of off-chain evidence)
+ * that is passed to the contract's `check_in` as a `BytesN<32>` argument, binding the
+ * on-chain record to the off-chain evidence artifact.
  * Returns not_configured if Soroban is not fully configured.
  */
 export const submitCheckIn = async (
   vaultId: string,
   milestoneId: string,
+  evidenceHash: string,
 ): Promise<VaultLifecycleResponse> => {
   const config = getSorobanConfig()
-  const args = { vaultId, milestoneId }
+  const args = { vaultId, milestoneId, evidenceHash }
 
   if (!config) {
     log('warn', 'soroban.check_in_not_configured', { vaultId, milestoneId })

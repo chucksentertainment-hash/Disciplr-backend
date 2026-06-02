@@ -41,6 +41,9 @@ export const envSchema = z
     NODE_ENV: z
       .enum(["development", "production", "test"])
       .default("development"),
+    LOG_LEVEL: z
+      .enum(["debug", "info", "warn", "error"])
+      .default("info"),
     PORT: positiveInt(3000),
     SERVICE_NAME: z.string().default("disciplr-backend"),
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required").refine(
@@ -114,6 +117,7 @@ export const envSchema = z
     JOB_QUEUE_POLL_INTERVAL_MS: positiveInt(250),
     JOB_HISTORY_LIMIT: positiveInt(50),
     ENABLE_JOB_SCHEDULER: z.string().optional(),
+    NOTIFICATION_PROVIDER: z.enum(["email", "console"]).default("console"),
 
     // ── ETL ───────────────────────────────────────────────────────
     ETL_INTERVAL_MINUTES: positiveInt(5),
@@ -133,7 +137,8 @@ export const envSchema = z
     SECURITY_FAILED_LOGIN_BURST_THRESHOLD: positiveInt(5),
     SECURITY_ALERT_COOLDOWN_MS: positiveInt(300_000),
     ORG_RATE_LIMIT_MAX: positiveInt(200),
-    ORG_RATE_LIMIT_WINDOW_MS: positiveInt(60_000),
+    ORG_RATE_LIMIT_WINDOW_MS: positiveInt(60000),
+    EXPORT_DAILY_QUOTA_LIMIT: positiveInt(100),
 
     // ── Deadline / Analytics schedulers ───────────────────────
     DEADLINE_CHECK_INTERVAL_MS: positiveInt(60_000),
@@ -141,8 +146,14 @@ export const envSchema = z
 
     // ── Misc / Limits ───────────────────────────────────────
     MAX_JSON_BODY_SIZE: z.string().default('500kb'),
+    NOTIFICATION_PROVIDER: z.string().optional(),
     HORIZON_LAG_THRESHOLD: nonNegativeInt(10),
     HORIZON_SHUTDOWN_TIMEOUT_MS: positiveInt(30_000),
+
+    // ── Export S3 ───────────────────────────────────────────
+    EXPORT_S3_BUCKET: z.string().optional(),
+    EXPORT_S3_REGION: z.string().optional(),
+    EXPORT_SIGNED_URL_TTL_S: positiveInt(3600),
   })
   .superRefine((data, ctx) => {
     // Existing CORS warning
@@ -159,9 +170,122 @@ export const envSchema = z
 export type Env = z.infer<typeof envSchema>;
 export type JwtKey = { kid: string; secret: string; retiredAt?: Date };
 
-/** Returns parsed JWT keys from the environment. */
-export function getJwtKeys(env: Env): JwtKey[] {
-  // The envSchema already transformed JWT_KEYS into an array of objects.
-  // TypeScript cannot infer that, so we cast.
-  return (env as any).JWT_KEYS as JwtKey[];
+let _validated: Env | undefined;
+
+/**
+ * Return the validated env, throwing if `initEnv()` has not been called.
+ */
+export function getEnv(): Env {
+  if (!_validated) {
+    throw new Error('Environment not validated yet — call initEnv() first');
+  }
+  return _validated;
+}
+
+/** Reset internal state — exposed for tests only. */
+export function _resetEnvForTesting(): void {
+  _validated = undefined;
+}
+
+/**
+ * Validate `process.env` against the schema.  On success the typed,
+ * transformed env object is returned together with any non-fatal warnings.
+ * On failure the process prints structured errors and exits with code 1
+ * (fail-fast).
+ *
+ * Sensitive values are never included in error output — only field names
+ * and validation messages are logged.
+ *
+ * @param env  Defaults to `process.env` — pass a custom record in tests.
+ */
+export function initEnv(
+  env: Record<string, string | undefined> = process.env,
+): { env: Env; warnings: EnvWarning[] } {
+  if (_validated) return { env: _validated, warnings: [] };
+
+  const result = envSchema.safeParse(env);
+
+  if (!result.success) {
+    const issues = result.error.issues.map((i) => {
+      const path = i.path.join(".");
+      return `  - ${path}: ${i.message}`;
+    });
+
+    console.error(
+      JSON.stringify({
+        level: "fatal",
+        event: "config.env_validation_failed",
+        service: "disciplr-backend",
+        message: "Environment validation failed — aborting startup",
+        errors: issues,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+    process.exit(1);
+  }
+
+  const validated = result.data;
+  _validated = validated;
+  const warnings: EnvWarning[] = [];
+
+  // In production, insecure secret defaults are a misconfiguration worth
+  // surfacing loudly — but they don't warrant a hard crash because the app
+  // can technically still start.
+  if (validated.NODE_ENV === "production") {
+    const insecureDefaults: Array<{ key: keyof Env; sentinel: string }> = [
+      { key: "JWT_SECRET", sentinel: "change-me-in-production-long-secret" },
+      { key: "JWT_ACCESS_SECRET", sentinel: "fallback-access-secret-long" },
+      { key: "JWT_REFRESH_SECRET", sentinel: "fallback-refresh-secret-long" },
+      { key: "DOWNLOAD_SECRET", sentinel: "change-me-in-production-long-secret" },
+    ];
+
+    for (const { key, sentinel } of insecureDefaults) {
+      if (validated[key] === sentinel) {
+        const w: EnvWarning = {
+          variable: key,
+          message: `${key} is using its insecure default value`,
+        };
+        warnings.push(w);
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            event: "config.insecure_default",
+            service: "disciplr-backend",
+            variable: key,
+            message: w.message,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
+    }
+  }
+
+    // Detect partially configured Soroban environment variables.
+    const sorobanVars = [
+      "SOROBAN_CONTRACT_ID",
+      "SOROBAN_NETWORK_PASSPHRASE",
+      "SOROBAN_SOURCE_ACCOUNT",
+      "SOROBAN_RPC_URL",
+      "SOROBAN_SECRET_KEY",
+    ];
+    const present = sorobanVars.filter((key) => validated[key as keyof Env] !== undefined && validated[key as keyof Env] !== "");
+    if (present.length > 0 && present.length < sorobanVars.length) {
+      const w: EnvWarning = {
+        variable: "SOROBAN_*",
+        message: "Partial Soroban configuration detected; submit mode will be disabled",
+      };
+      warnings.push(w);
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          event: "config.partial_soroban_configuration",
+          service: "disciplr-backend",
+          variable: "SOROBAN_*",
+          message: w.message,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    }
+
+  return { env: validated, warnings };
 }

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express'
+import { Router, Request, Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { requireAdmin } from '../middleware/rbac.js'
 import {
@@ -13,6 +13,8 @@ import {
   transitionVerifier,
   updateVerifierProfile,
 } from '../services/verifiers.js'
+import { isValidStellarAddress } from '../services/vaultValidation.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 export const adminVerifiersRouter = Router()
 
@@ -34,7 +36,7 @@ adminVerifiersRouter.get('/:userId', async (req: Request, res: Response) => {
   res.json({ profile: p, stats: await getVerifierStats(userId) })
 })
 
-adminVerifiersRouter.post('/', async (req: Request, res: Response) => {
+adminVerifiersRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
   const { userId, displayName, metadata, status } = req.body as {
     userId?: unknown
     displayName?: unknown
@@ -45,6 +47,15 @@ adminVerifiersRouter.post('/', async (req: Request, res: Response) => {
   if (typeof userId !== 'string' || userId.trim().length === 0) {
     res.status(400).json({ error: 'userId is required' })
     return
+  }
+
+  // If userId appears to be a Stellar address, ensure checksum is valid
+  try {
+    if (userId && typeof userId === 'string' && !(await isValidStellarAddress(userId.trim()))) {
+      return next(AppError.validation('invalid Stellar public key', { field: 'userId' }))
+    }
+  } catch (err) {
+    return next(AppError.internal('address validation failed'))
   }
 
   if (displayName !== undefined && displayName !== null && typeof displayName !== 'string') {
