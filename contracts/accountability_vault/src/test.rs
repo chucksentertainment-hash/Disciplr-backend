@@ -727,3 +727,55 @@ fn test_create_vault_failure_destination_equals_creator_fails() {
         &guardian,
     );
 }
+
+// ── pre-init paths ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_vault_not_initialized() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountabilityVault);
+    let contract = AccountabilityVaultClient::new(&env, &contract_id);
+    let vault_id = String::from_str(&env, "v1");
+
+    let result = contract.try_get_vault(&vault_id);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+#[test]
+fn test_stake_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, AccountabilityVault);
+    let contract = AccountabilityVaultClient::new(&env, &contract_id);
+    let vault_id = String::from_str(&env, "v1");
+    let creator = Address::generate(&env);
+
+    let result = contract.try_stake(&vault_id, &creator);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+#[test]
+fn test_check_in_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, AccountabilityVault);
+    let contract = AccountabilityVaultClient::new(&env, &contract_id);
+    let vault_id = String::from_str(&env, "v1");
+    let verifier = Address::generate(&env);
+
+    let result = contract.try_check_in(&vault_id, &verifier, &0);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+#[test]
+fn test_claim_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, AccountabilityVault);
+    let contract = AccountabilityVaultClient::new(&env, &contract_id);
+    let vault_id = String::from_str(&env, "v1");
+    let creator = Address::generate(&env);
+
+    let result = contract.try_claim(&vault_id, &creator);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
