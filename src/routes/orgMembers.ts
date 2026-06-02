@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { requireOrgAccess } from '../middleware/orgAuth.js'
@@ -11,6 +12,24 @@ import {
   LastAdminError,
 } from '../services/membership.js'
 import type { OrgRole } from '../models/organizations.js'
+import db from '../db/index.js'
+import { buildNotificationProviderRegistry } from '../services/notifications/factory.js'
+
+const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex')
+}
+
+/** Constant-time comparison to prevent timing attacks on the token hash. */
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    // Still run timingSafeEqual on same-length buffers to mask the length check
+    crypto.timingSafeEqual(Buffer.from(a.padEnd(64, '0')), Buffer.from(a.padEnd(64, '0')))
+    return false
+  }
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b))
+}
 
 export const orgMembersRouter = Router()
 
@@ -150,6 +169,114 @@ orgMembersRouter.patch(
 
       const message = err instanceof Error ? err.message : 'Failed to update role.'
       return next(AppError.notFound(message))
+    }
+  },
+)
+
+// ─── POST /api/organizations/:orgId/invitations ───────────────────────────────
+// Issue a one-time invitation token for an email address.
+// Only owners and admins may invite.
+
+orgMembersRouter.post(
+  '/:orgId/invitations',
+  authenticate,
+  requireOrgAccess('owner', 'admin'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    const { orgId } = req.params
+    const { email } = req.body as { email?: string }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return next(AppError.badRequest('A valid email is required.'))
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('hex')
+    const tokenHash = hashToken(rawToken)
+    const expiresAt = new Date(Date.now() + INVITATION_TTL_MS)
+
+    try {
+      const [invitation] = await db('org_invitations')
+        .insert({ org_id: orgId, email, token_hash: tokenHash, expires_at: expiresAt })
+        .returning(['id', 'org_id', 'email', 'expires_at'])
+
+      createAuditLog({
+        actor_user_id: req.user!.userId,
+        action: 'org.invitation.created',
+        target_type: 'org_invitation',
+        target_id: invitation.id,
+        metadata: { orgId, email },
+      })
+
+      // Notify the invitee
+      const provider = buildNotificationProviderRegistry().console
+      await provider.send(
+        email,
+        `You have been invited to join an organization`,
+        `Use this token to accept: ${rawToken} (expires ${expiresAt.toISOString()})`,
+      )
+
+      res.status(201).json({
+        id: invitation.id,
+        orgId: invitation.org_id,
+        email: invitation.email,
+        expiresAt: invitation.expires_at,
+        token: rawToken, // returned once — caller delivers this to the recipient
+      })
+    } catch (err) {
+      return next(AppError.internal('Failed to create invitation.'))
+    }
+  },
+)
+
+// ─── POST /api/organizations/:orgId/invitations/accept ────────────────────────
+// Accept an invitation by submitting the raw token and desired userId.
+// Promotes the recipient to org member.
+
+orgMembersRouter.post(
+  '/:orgId/invitations/accept',
+  async (req: Request, res: Response, next: NextFunction) => {
+    const { orgId } = req.params
+    const { token, userId, role } = req.body as { token?: string; userId?: string; role?: string }
+
+    if (!token || !userId) {
+      return next(AppError.badRequest('token and userId are required.'))
+    }
+
+    const incomingHash = hashToken(token)
+
+    const invitation = await db('org_invitations')
+      .where({ org_id: orgId })
+      .whereNull('accepted_at')
+      .where('expires_at', '>', new Date())
+      .first()
+
+    if (!invitation || !safeEqual(invitation.token_hash, incomingHash)) {
+      return next(AppError.badRequest('Invalid or expired invitation token.'))
+    }
+
+    const validRoles: OrgRole[] = ['owner', 'admin', 'member']
+    const assignedRole: OrgRole = validRoles.includes(role as OrgRole) ? (role as OrgRole) : 'member'
+
+    try {
+      const membership = await createMembership({
+        user_id: userId,
+        organization_id: orgId,
+        role: assignedRole,
+      })
+
+      await db('org_invitations').where({ id: invitation.id }).update({ accepted_at: new Date() })
+
+      createAuditLog({
+        actor_user_id: userId,
+        action: 'org.invitation.accepted',
+        target_type: 'org_invitation',
+        target_id: invitation.id,
+        metadata: { orgId, userId, role: assignedRole },
+      })
+
+      res.status(200).json({ orgId, userId, role: membership.role })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to accept invitation.'
+      return next(AppError.conflict(message))
     }
   },
 )

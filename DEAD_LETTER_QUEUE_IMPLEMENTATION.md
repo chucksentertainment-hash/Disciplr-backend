@@ -2,7 +2,7 @@
 
 ## Overview
 
-The dead-letter queue feature for the custom in-memory job queue has been **fully implemented, tested, and documented**. This feature ensures that jobs that permanently fail (after exhausting maximum retry attempts) are stored in a dead-letter queue for inspection and replay rather than being silently dropped.
+The dead- letter queue feature for the custom in-memory job queue has been **fully implemented, tested, and documented**. This feature ensures that jobs that permanently fail (after exhausting maximum retry attempts) are stored in a dead-letter queue for inspection & replay rather than being silently dropped.
 
 ## Implementation Details
 

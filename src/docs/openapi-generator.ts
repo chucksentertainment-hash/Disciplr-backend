@@ -4,11 +4,35 @@ import {
   extendZodWithOpenApi,
 } from '@asteasolutions/zod-to-openapi'
 import { z } from 'zod'
-import { registerSchema, loginSchema, refreshSchema } from '../lib/validation.js'
-import { createVaultSchema } from '../services/vaultValidation.js'
+import { registerSchema, loginSchema } from '../lib/validation.js'
 import { UserRole } from '../types/user.js'
 
 extendZodWithOpenApi(z)
+
+// ==================== EXPORT SCHEMAS ====================
+
+export const ExportRequestSchema = z.object({
+  format: z.enum(['csv', 'json']).openapi({ description: 'Output format for the export', example: 'json' }),
+  scope: z.enum(['vaults', 'transactions', 'analytics', 'all']).openapi({ description: 'Data scope for the export', example: 'all' }),
+  targetUserId: z.string().optional().openapi({ description: 'Target user ID (admin-only exports)', example: 'user_123' }),
+}).openapi('ExportRequest')
+
+export const ExportJobResponseSchema = z.object({
+  jobId: z.string().openapi({ description: 'Export job identifier', example: 'job_abc123' }),
+  statusUrl: z.string().openapi({ description: 'URL to poll for job status', example: '/api/exports/status/job_abc123' }),
+  pollIntervalMs: z.number().openapi({ description: 'Recommended polling interval in milliseconds', example: 1000 }),
+}).openapi('ExportJobResponse')
+
+export const ExportJobStatusSchema = z.object({
+  jobId: z.string().openapi({ example: 'job_abc123' }),
+  status: z.enum(['pending', 'running', 'done', 'failed']).openapi({ example: 'done' }),
+  attempts: z.number().openapi({ example: 1 }),
+  maxAttempts: z.number().openapi({ example: 3 }),
+  completedAt: z.string().datetime().optional().openapi({ example: '2026-06-02T10:00:00Z' }),
+  downloadUrl: z.string().optional().openapi({ description: 'Download URL (present when status is done)', example: '/api/exports/download/token_xyz' }),
+  expiresInSeconds: z.number().optional().openapi({ example: 3600 }),
+  error: z.string().optional().openapi({ description: 'Error message if status is failed' }),
+}).openapi('ExportJobStatus')
 
 export const registry = new OpenAPIRegistry()
 
@@ -107,7 +131,7 @@ registry.registerPath({
       description: 'User registered successfully',
       content: { 'application/json': { schema: z.any() } },
     },
-    400: { description: 'Bad request', content: { 'application/json': { schema: registry.getComponentRef('ErrorEnvelope') } } },
+    400: { description: 'Bad request', content: { 'application/json': { schema: z.any() } } },
   },
 })
 
@@ -128,7 +152,7 @@ registry.registerPath({
       description: 'Login successful',
       content: { 'application/json': { schema: z.any() } },
     },
-    401: { description: 'Unauthorized', content: { 'application/json': { schema: registry.getComponentRef('ErrorEnvelope') } } },
+    401: { description: 'Unauthorized', content: { 'application/json': { schema: z.any() } } },
   },
 })
 
@@ -156,7 +180,16 @@ registry.registerPath({
   request: {
     body: {
       content: {
-        'application/json': { schema: createVaultSchema },
+        'application/json': {
+          schema: z.object({
+            creator: z.string(),
+            amount: z.string(),
+            endTimestamp: z.string().datetime(),
+            successDestination: z.string(),
+            failureDestination: z.string(),
+            milestones: z.array(z.object({ description: z.string() })).optional(),
+          }),
+        },
       },
     },
   },
@@ -383,7 +416,7 @@ registry.registerPath({
         'application/json': {
           schema: z.object({
             data: z.array(z.any()),
-            pagination: registry.getComponentRef('PaginationCursor'),
+            pagination: z.any(),
           }),
         },
       },
@@ -781,6 +814,97 @@ registry.registerPath({
     400: { description: 'Invalid reason code' },
     404: { description: 'Vault not found' },
     409: { description: 'Vault already cancelled or not cancellable' },
+  },
+})
+
+// ==================== EXPORT ROUTES ====================
+
+const ExportRequestRef = registry.register('ExportRequest', ExportRequestSchema)
+const ExportJobResponseRef = registry.register('ExportJobResponse', ExportJobResponseSchema)
+const ExportJobStatusRef = registry.register('ExportJobStatus', ExportJobStatusSchema)
+
+// POST /api/exports/me
+registry.registerPath({
+  method: 'post',
+  path: '/api/exports/me',
+  summary: 'Enqueue a personal data export job',
+  tags: ['Exports'],
+  security: [{ bearerAuth: [] }],
+  request: {
+    query: ExportRequestSchema.pick({ format: true, scope: true }),
+  },
+  responses: {
+    202: {
+      description: 'Export job enqueued',
+      content: { 'application/json': { schema: ExportJobResponseRef } },
+    },
+    400: { description: 'Invalid format or scope', content: { 'application/json': { schema: z.any() } } },
+    429: { description: 'Export quota exceeded' },
+    409: { description: 'Idempotency key conflict' },
+  },
+})
+
+// POST /api/exports/admin
+registry.registerPath({
+  method: 'post',
+  path: '/api/exports/admin',
+  summary: 'Enqueue an admin export job (all users or target user)',
+  tags: ['Exports'],
+  security: [{ bearerAuth: [] }],
+  request: {
+    query: ExportRequestSchema,
+  },
+  responses: {
+    202: {
+      description: 'Export job enqueued',
+      content: { 'application/json': { schema: ExportJobResponseRef } },
+    },
+    400: { description: 'Invalid format or scope', content: { 'application/json': { schema: z.any() } } },
+    403: { description: 'Admin access required' },
+    429: { description: 'Export quota exceeded' },
+    409: { description: 'Idempotency key conflict' },
+  },
+})
+
+// GET /api/exports/status/:jobId
+registry.registerPath({
+  method: 'get',
+  path: '/api/exports/status/{jobId}',
+  summary: 'Poll export job status',
+  tags: ['Exports'],
+  security: [{ bearerAuth: [] }],
+  parameters: [
+    { name: 'jobId', in: 'path', required: true, schema: { type: 'string' } },
+  ],
+  responses: {
+    200: {
+      description: 'Export job status',
+      content: { 'application/json': { schema: ExportJobStatusRef } },
+    },
+    403: { description: 'Access denied' },
+    404: { description: 'Job not found' },
+  },
+})
+
+// GET /api/exports/download/:token
+registry.registerPath({
+  method: 'get',
+  path: '/api/exports/download/{token}',
+  summary: 'Download completed export file',
+  tags: ['Exports'],
+  parameters: [
+    { name: 'token', in: 'path', required: true, schema: { type: 'string' }, description: 'Signed download token from status response' },
+  ],
+  responses: {
+    200: {
+      description: 'Export file content',
+      content: {
+        'application/json': { schema: z.any() },
+        'text/csv': { schema: z.any() },
+      },
+    },
+    401: { description: 'Invalid or expired download token' },
+    404: { description: 'Export not ready or not found' },
   },
 })
 

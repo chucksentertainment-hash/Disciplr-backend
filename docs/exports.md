@@ -2,6 +2,23 @@
 
 The exports pipeline now runs through the background job system using the `export.generate` job type.
 
+## OpenAPI Schemas
+
+The export endpoints are documented via `@asteasolutions/zod-to-openapi` schemas defined in `src/docs/openapi-generator.ts`:
+
+| Schema | Description |
+|--------|-------------|
+| `ExportRequest` | Query params for `POST /api/exports/me` and `POST /api/exports/admin` (`format`, `scope`, optional `targetUserId`) |
+| `ExportJobResponse` | 202 response with `jobId`, `statusUrl`, and `pollIntervalMs` |
+| `ExportJobStatus` | Poll response with `status`, `attempts`, optional `downloadUrl` and `error` |
+
+Regenerate the spec after schema changes:
+
+```bash
+npm run openapi:generate
+npm run openapi:validate
+```
+
 ## Flow
 
 1. `POST /api/exports/me` or `POST /api/exports/admin` persists an `export_jobs` row.

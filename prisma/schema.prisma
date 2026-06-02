@@ -55,6 +55,7 @@ model RefreshToken {
 }
 
 model Vault {
+deletedAt  DateTime?  @map("deleted_at")
   id                 String      @id @default(uuid())
   creatorId          String      @map("creator_id")
   creator            User        @relation(fields: [creatorId], references: [id])
