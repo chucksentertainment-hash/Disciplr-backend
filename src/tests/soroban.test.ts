@@ -19,6 +19,7 @@ import {
   submitClaim,
   submitWithdraw,
 } from '../services/soroban.js'
+import { SorobanTimeoutError } from '../middleware/errorHandler.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -1071,4 +1072,146 @@ it('returns correct default sourceAccount when env is not set', async () => {
        expect(serialized).not.toContain('SCZANGBA')
      })
    })
+
+  // ─── Deadline-bounded polling (#435) ──────────────────────────────────────
+
+  describe('deadline-bounded polling (SOROBAN_SUBMIT_TIMEOUT_MS)', () => {
+    const makeTimeoutConfig = (overrides: Partial<Record<string, string>> = {}): SorobanConfig => {
+      setEnv({
+        ...FULL_ENV,
+        RETRY_MAX_ATTEMPTS: '1',
+        RETRY_BACKOFF_MS: '1',
+        SOROBAN_SUBMIT_POLL_INTERVAL_MS: '1',
+        SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: '3',
+        SOROBAN_RPC_TIMEOUT_MS: '5000',
+        SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS: '2',
+        SOROBAN_SUBMIT_TIMEOUT_MS: '5000',
+        ...overrides,
+      })
+      const config = getSorobanConfig()
+      expect(config).not.toBeNull()
+      return config!
+    }
+
+    it('resolves immediately when getTransaction returns SUCCESS on first poll', async () => {
+      makeTimeoutConfig()
+      const { client } = createMockClient({ txHash: 'tx-immediate' })
+      setSorobanClient(client)
+      const input = makeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultCreationPayload(input, makeVault())
+      expect(result.submission.status).toBe('success')
+      expect(result.submission.txHash).toBe('tx-immediate')
+    })
+
+    it('surfaces error status when submission rejects', async () => {
+      makeTimeoutConfig()
+      const { client } = createMockClient(undefined, new Error('poll-failure'))
+      setSorobanClient(client)
+      const input = makeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultCreationPayload(input, makeVault())
+      expect(result.submission.status).toBe('error')
+    })
+
+    it('throws when getTransaction returns FAILED status via defaultSorobanClient', async () => {
+      const makeFakeSdk = (server: Record<string, jest.Mock>) => ({
+        Keypair: { fromSecret: jest.fn(() => ({ sign: jest.fn(), publicKey: jest.fn() })) },
+        Contract: class { call = jest.fn(() => ({})) },
+        rpc: { Server: jest.fn(() => server) },
+        TransactionBuilder: class {
+          addOperation = jest.fn(() => this); setTimeout = jest.fn(() => this); build = jest.fn(() => ({}))
+        },
+        nativeToScVal: jest.fn((v: unknown) => v),
+        BASE_FEE: '100',
+      })
+
+      const server = {
+        getAccount: jest.fn().mockResolvedValue({}),
+        prepareTransaction: jest.fn().mockResolvedValue({ sign: jest.fn() }),
+        sendTransaction: jest.fn().mockResolvedValue({ status: 'PENDING', hash: 'tx-failed' }),
+        getTransaction: jest.fn().mockResolvedValue({ status: 'FAILED' }),
+      }
+      const client = createDefaultSorobanClient(async () => makeFakeSdk(server))
+      const cfg = makeTimeoutConfig()
+
+      await expect(client.submitVaultCreation(cfg, makeVault() as any))
+        .rejects.toThrow('Soroban transaction did not succeed: FAILED')
+    })
+
+    it('throws SorobanTimeoutError when deadline is exceeded during polling', async () => {
+      const makeFakeSdk = (server: Record<string, jest.Mock>) => ({
+        Keypair: { fromSecret: jest.fn(() => ({ sign: jest.fn(), publicKey: jest.fn() })) },
+        Contract: class { call = jest.fn(() => ({})) },
+        rpc: { Server: jest.fn(() => server) },
+        TransactionBuilder: class {
+          addOperation = jest.fn(() => this); setTimeout = jest.fn(() => this); build = jest.fn(() => ({}))
+        },
+        nativeToScVal: jest.fn((v: unknown) => v),
+        BASE_FEE: '100',
+      })
+
+      const server = {
+        getAccount: jest.fn().mockResolvedValue({}),
+        prepareTransaction: jest.fn().mockResolvedValue({ sign: jest.fn() }),
+        sendTransaction: jest.fn().mockResolvedValue({ status: 'PENDING', hash: 'tx-timeout' }),
+        getTransaction: jest.fn().mockResolvedValue({ status: 'NOT_FOUND' }),
+      }
+      const client = createDefaultSorobanClient(async () => makeFakeSdk(server))
+      const cfg = makeTimeoutConfig({ SOROBAN_SUBMIT_TIMEOUT_MS: '1', SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: '5' })
+      await new Promise((r) => setTimeout(r, 5))
+      await expect(client.submitVaultCreation(cfg, makeVault() as any))
+        .rejects.toBeInstanceOf(SorobanTimeoutError)
+    })
+
+    it('SorobanTimeoutError carries txHash, elapsedMs, code, and status', async () => {
+      const hash = 'tx-timeout-meta'
+      const makeFakeSdk = (server: Record<string, jest.Mock>) => ({
+        Keypair: { fromSecret: jest.fn(() => ({ sign: jest.fn(), publicKey: jest.fn() })) },
+        Contract: class { call = jest.fn(() => ({})) },
+        rpc: { Server: jest.fn(() => server) },
+        TransactionBuilder: class {
+          addOperation = jest.fn(() => this); setTimeout = jest.fn(() => this); build = jest.fn(() => ({}))
+        },
+        nativeToScVal: jest.fn((v: unknown) => v),
+        BASE_FEE: '100',
+      })
+
+      const server = {
+        getAccount: jest.fn().mockResolvedValue({}),
+        prepareTransaction: jest.fn().mockResolvedValue({ sign: jest.fn() }),
+        sendTransaction: jest.fn().mockResolvedValue({ status: 'PENDING', hash }),
+        getTransaction: jest.fn().mockResolvedValue({ status: 'NOT_FOUND' }),
+      }
+      const client = createDefaultSorobanClient(async () => makeFakeSdk(server))
+      const cfg = makeTimeoutConfig({ SOROBAN_SUBMIT_TIMEOUT_MS: '1', SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: '5' })
+      await new Promise((r) => setTimeout(r, 5))
+
+      let caught: unknown
+      try {
+        await client.submitVaultCreation(cfg, makeVault() as any)
+      } catch (e) {
+        caught = e
+      }
+
+      expect(caught).toBeInstanceOf(SorobanTimeoutError)
+      const err = caught as SorobanTimeoutError
+      expect(err.txHash).toBe(hash)
+      expect(err.elapsedMs).toBe(1)
+      expect(err.code).toBe('SOROBAN_TIMEOUT')
+      expect(err.status).toBe(504)
+    })
+
+    it('SOROBAN_SUBMIT_TIMEOUT_MS is read from env correctly', () => {
+      setEnv({ ...FULL_ENV, SOROBAN_SUBMIT_TIMEOUT_MS: '45000' })
+      const config = getSorobanConfig()
+      expect(config).not.toBeNull()
+      expect(config!.submitTimeoutMs).toBe(45000)
+    })
+
+    it('submitTimeoutMs defaults to 60000 when env var is absent', () => {
+      setEnv(FULL_ENV)
+      const config = getSorobanConfig()
+      expect(config).not.toBeNull()
+      expect(config!.submitTimeoutMs).toBe(60000)
+    })
+  })
  })

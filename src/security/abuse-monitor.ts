@@ -1,4 +1,6 @@
 import type { NextFunction, Request, Response } from 'express'
+import type { AbuseCategory } from '../types/security.js'
+import { logger } from '../middleware/logger.js'
 
 type SuspiciousPatternType =
   | 'endpoint_scan'
@@ -83,8 +85,7 @@ export function securityMetricsMiddleware(
     if (isFailedLoginAttempt(path, status)) {
       state.failedLoginTimes.push(now)
       metrics.failedLoginAttempts += 1
-      logSecurityEvent('security.failed_login_attempt', {
-        ip,
+      logSecurityEvent('security.failed_login_attempt', ip, null, {
         path,
         method: req.method,
         status,
@@ -116,12 +117,13 @@ export function securityRateLimitMiddleware(
 
   if (state.requestTimes.length > config.rateLimitMaxRequests) {
     metrics.rateLimitTriggers += 1
-    logSecurityEvent('security.rate_limit_triggered', {
-      ip,
-      path: sanitizePath(req.originalUrl),
-      method: req.method,
+    logSecurityEvent('security.rate_limit_triggered', ip, {
+      type: 'rate-limit-trip',
       requestCount: state.requestTimes.length,
       windowMs: config.rateLimitWindowMs,
+    }, {
+      path: sanitizePath(req.originalUrl),
+      method: req.method,
       threshold: config.rateLimitMaxRequests,
     })
     res.status(429).json({ error: 'Too many requests' })
@@ -178,6 +180,19 @@ export function getSecurityMetricsSnapshot(): Record<string, unknown> {
     },
     activeIpCount: ipStates.size,
     topSources,
+  }
+}
+
+/**
+ * Returns per-category abuse event counts keyed by AbuseCategory type.
+ * Maps internal SuspiciousPatternType names to the structured taxonomy.
+ */
+export function getAbuseCategoryCounts(): Record<string, number> {
+  return {
+    'brute-force': metrics.suspiciousPatterns.failed_login_burst,
+    'enumeration': metrics.suspiciousPatterns.endpoint_scan,
+    'payload-anomaly': metrics.suspiciousPatterns.repeated_bad_requests,
+    'rate-limit-trip': metrics.suspiciousPatterns.high_volume,
   }
 }
 
@@ -281,12 +296,42 @@ function emitSuspiciousAlert(
   state.lastAlertAt[pattern] = now
   metrics.suspiciousPatterns[pattern] += 1
 
-  logSecurityEvent('security.suspicious_pattern', {
-    ip,
-    pattern,
+  const category = buildAbuseCategory(pattern, details)
+
+  logSecurityEvent('security.suspicious_pattern', ip, category, {
     alertCooldownMs: config.alertCooldownMs,
     ...details,
   })
+}
+
+function buildAbuseCategory(pattern: SuspiciousPatternType, details: Record<string, number>): AbuseCategory {
+  switch (pattern) {
+    case 'failed_login_burst':
+      return {
+        type: 'brute-force',
+        failedLoginCount: details.currentValue ?? 0,
+        windowMs: details.windowMs ?? config.failedLoginWindowMs,
+      }
+    case 'endpoint_scan':
+      return {
+        type: 'enumeration',
+        notFoundCount: details.current404Count ?? 0,
+        distinctPathCount: details.distinctPathCount ?? 0,
+        windowMs: details.windowMs ?? config.suspiciousWindowMs,
+      }
+    case 'repeated_bad_requests':
+      return {
+        type: 'payload-anomaly',
+        badRequestCount: details.currentValue ?? 0,
+        windowMs: details.windowMs ?? config.suspiciousWindowMs,
+      }
+    case 'high_volume':
+      return {
+        type: 'rate-limit-trip',
+        requestCount: details.currentValue ?? 0,
+        windowMs: details.windowMs ?? config.suspiciousWindowMs,
+      }
+  }
 }
 
 function maybeCleanupIdleIpStates(now: number): void {
@@ -337,16 +382,45 @@ function sanitizePath(path: string): string {
   return sanitized || '/'
 }
 
-function logSecurityEvent(event: string, data: Record<string, unknown>): void {
-  console.log(
-    JSON.stringify({
-      level: 'warn',
-      event,
-      service: 'disciplr-backend',
-      timestamp: new Date().toISOString(),
-      ...data,
-    }),
-  )
+function logSecurityEvent(event: string, ip: string, category: AbuseCategory | null, data: Record<string, unknown>): void {
+  // Use the centralized Pino logger for structured, redacted output.
+  // Attach the event, ip and optional category as top-level keys to facilitate aggregation.
+  const payload: Record<string, unknown> = {
+    event,
+    ip,
+    ...data,
+  }
+
+  if (category !== null) {
+    payload.category = category
+  }
+
+  // pino will handle timestamps and redaction based on configuration
+  logger.warn(payload)
+}
+
+/**
+ * Test helper: emit a structured suspicious event immediately (increments internal counters).
+ * Exposed to tests so we can assert structured pino output without exercising Express flows.
+ */
+export function emitTestSuspiciousEvent(ip: string, category: AbuseCategory, extra: Record<string, unknown> = {}): void {
+  // Map category.type back to the internal suspiciousPatterns counters
+  switch (category.type) {
+    case 'brute-force':
+      metrics.suspiciousPatterns.failed_login_burst += 1
+      break
+    case 'enumeration':
+      metrics.suspiciousPatterns.endpoint_scan += 1
+      break
+    case 'payload-anomaly':
+      metrics.suspiciousPatterns.repeated_bad_requests += 1
+      break
+    case 'rate-limit-trip':
+      metrics.suspiciousPatterns.high_volume += 1
+      break
+  }
+
+  logSecurityEvent('security.suspicious_pattern', ip, category, extra)
 }
 
 function readPositiveIntEnv(name: string, fallback: number): number {

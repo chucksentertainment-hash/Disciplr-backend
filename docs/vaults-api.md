@@ -259,3 +259,72 @@ The validation logic is covered by comprehensive tests including:
   // ... other fields
 }
 ```
+
+## Soroban Transaction Polling and Timeout
+
+When `onChain.mode` is `"submit"`, the backend sends the transaction to the Soroban RPC and then polls `getTransaction` until the tx reaches a terminal state.
+
+### Polling behaviour
+
+- After `sendTransaction` returns `PENDING` or `TRY_AGAIN_LATER`, the backend enters a bounded poll loop.
+- Each poll calls `getTransaction(hash)`.
+  - `NOT_FOUND` → sleep `SOROBAN_SUBMIT_POLL_INTERVAL_MS` ms and retry (up to `SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS` attempts).
+  - `SUCCESS` → resolve with `{ txHash }`.
+  - `FAILED` → throw `Error("Soroban transaction did not succeed: FAILED")`.
+- The entire poll window is bounded by `SOROBAN_SUBMIT_TIMEOUT_MS`. If the deadline elapses before a terminal status is reached, a `SorobanTimeoutError` is thrown.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOROBAN_SUBMIT_TIMEOUT_MS` | `60000` | Hard deadline (ms) for the entire poll window. |
+| `SOROBAN_SUBMIT_POLL_INTERVAL_MS` | `1000` | Delay between individual `getTransaction` polls. |
+| `SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS` | `30` | Maximum number of poll attempts before giving up. |
+
+### SorobanTimeoutError
+
+`SorobanTimeoutError` is thrown (and surfaced in the submission response as `status: "error"`) when the deadline is exceeded. It carries:
+
+- `txHash` — the transaction hash that was being polled.
+- `elapsedMs` — the configured deadline that was exceeded (`SOROBAN_SUBMIT_TIMEOUT_MS`).
+- `code` — `"SOROBAN_TIMEOUT"`.
+- `status` — `504`.
+
+Example submission response when a timeout occurs:
+
+```json
+{
+  "mode": "submit",
+  "payload": { "..." },
+  "submission": {
+    "attempted": true,
+    "status": "error",
+    "error": "Soroban transaction tx-abc123 did not finalise within 60000ms"
+  }
+}
+```
+
+## Soroban Transaction Polling and Timeout
+
+When `onChain.mode` is `"submit"`, the backend polls `getTransaction` after sending the transaction until a terminal state is reached.
+
+### Polling behaviour
+
+- After `sendTransaction` returns `PENDING`, the backend enters a bounded poll loop using `retryWithBackoff`.
+- Each poll calls `getTransaction(hash)`:
+  - `NOT_FOUND` → sleep `SOROBAN_SUBMIT_POLL_INTERVAL_MS` ms and retry.
+  - `SUCCESS` → resolves with `{ txHash }`.
+  - `FAILED` → throws an error immediately.
+- The entire poll window is bounded by `SOROBAN_SUBMIT_TIMEOUT_MS`. If the deadline elapses, a `SorobanTimeoutError` is thrown.
+
+### Env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOROBAN_SUBMIT_TIMEOUT_MS` | `60000` | Hard deadline (ms) for the whole poll window. |
+| `SOROBAN_SUBMIT_POLL_INTERVAL_MS` | `1000` | Delay between `getTransaction` polls. |
+| `SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS` | `30` | Max poll attempts before giving up. |
+
+### SorobanTimeoutError
+
+Thrown when the deadline is exceeded. Carries `txHash`, `elapsedMs`, `code: "SOROBAN_TIMEOUT"`, `status: 504`. Surfaced in the submission response as `status: "error"`.

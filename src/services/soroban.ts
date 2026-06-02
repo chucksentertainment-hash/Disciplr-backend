@@ -1,5 +1,6 @@
 import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
 import { retryWithBackoff, sleep, type RetryConfig } from '../utils/retry.js'
+import { AppError, SorobanTimeoutError } from '../middleware/errorHandler.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
@@ -23,6 +24,7 @@ export interface SorobanConfig {
   submitPollIntervalMs: number
   submitPollMaxAttempts: number
   rpcTimeoutMs: number
+  submitTimeoutMs: number
   submitRetry: RetryConfig
 }
 
@@ -66,6 +68,7 @@ export const getSorobanConfig = (): SorobanConfig | null => {
     submitPollIntervalMs: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_INTERVAL_MS', DEFAULT_SUBMIT_POLL_INTERVAL_MS),
     submitPollMaxAttempts: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS', DEFAULT_SUBMIT_POLL_MAX_ATTEMPTS),
     rpcTimeoutMs: positiveIntFromEnv('SOROBAN_RPC_TIMEOUT_MS', DEFAULT_RPC_TIMEOUT_MS),
+    submitTimeoutMs: positiveIntFromEnv('SOROBAN_SUBMIT_TIMEOUT_MS', 60_000),
     submitRetry: getSubmitRetryConfig(),
   }
 }
@@ -120,14 +123,29 @@ async function submitTransaction(
     throw new Error(`Soroban sendTransaction failed: ${response.status}`)
   }
 
-  let getResponse = await server.getTransaction(response.hash)
-  const maxAttempts = 30
-  let attempts = 0
-  while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
-    await new Promise((r) => setTimeout(r, 1000))
-    getResponse = await server.getTransaction(response.hash)
-    attempts++
+  const deadline = Date.now() + config.submitTimeoutMs
+  const pollConfig: RetryConfig = {
+    maxAttempts: config.submitPollMaxAttempts,
+    initialBackoffMs: config.submitPollIntervalMs,
+    maxBackoffMs: config.submitPollIntervalMs,
+    backoffMultiplier: 1,
+    jitterFactor: 0,
   }
+
+  let getResponse = await retryWithBackoff(
+    async () => {
+      if (Date.now() >= deadline) {
+        throw new SorobanTimeoutError(response.hash, config.submitTimeoutMs)
+      }
+      const result = await server.getTransaction(response.hash)
+      if (result.status === 'NOT_FOUND') {
+        throw Object.assign(new Error('transaction_pending'), { retryable: true })
+      }
+      return result
+    },
+    pollConfig,
+    (err) => !!(err as any).retryable,
+  )
 
   if (getResponse.status !== 'SUCCESS') {
     throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)

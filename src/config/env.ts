@@ -110,6 +110,7 @@ export const envSchema = z
     SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: positiveInt(30),
     SOROBAN_RPC_TIMEOUT_MS: positiveInt(30_000),
     SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS: positiveInt(5_000),
+    SOROBAN_SUBMIT_TIMEOUT_MS: positiveInt(60_000),
     STELLAR_NETWORK_PASSPHRASE: z.string().optional(),
 
     // ── Job system ───────────────────────────────────────────────

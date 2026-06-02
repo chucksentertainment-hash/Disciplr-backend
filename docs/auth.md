@@ -369,3 +369,13 @@ The test suite includes property-based tests with minimum 100 iterations per pro
 
 ## Middleware Consolidation
 `auth.middleware.ts` and `userAuth.ts` have been consolidated into `auth.ts`. Please import `authenticate` and `authorize` strictly from `src/middleware/auth.js`. `requireUserAuth` is deprecated and will be removed in #454.
+
+## Abuse Detection and Anomaly Categories
+
+Failed authentication attempts are tracked by the `security/abuse-monitor.ts` middleware and emitted as structured log events with an `AbuseCategory` discriminated union. See `src/types/security.ts` for the full type definition.
+
+Auth-related categories:
+
+- **`brute-force`**: Triggered when a source IP exceeds `SECURITY_FAILED_LOGIN_BURST_THRESHOLD` failed logins within `SECURITY_FAILED_LOGIN_WINDOW_MS`. Carries `failedLoginCount` and `windowMs`.
+
+Aggregate counts are available at `GET /api/admin/abuse/category-counts` for admin users.

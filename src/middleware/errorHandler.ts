@@ -22,6 +22,8 @@ export const ErrorCode = {
   RATE_LIMITED: 'RATE_LIMITED',
   // 500
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  // 504
+  SOROBAN_TIMEOUT: 'SOROBAN_TIMEOUT',
 } as const
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode]
@@ -115,6 +117,24 @@ export class AppError extends Error {
 
   static payloadTooLarge(message = 'Payload too large') {
     return new AppError(413, ErrorCode.PAYLOAD_TOO_LARGE, message)
+  }
+}
+
+/**
+ * Thrown when the Soroban transaction status polling deadline is exceeded.
+ * Maps to HTTP 504 Gateway Timeout.
+ */
+export class SorobanTimeoutError extends Error {
+  readonly code = ErrorCode.SOROBAN_TIMEOUT
+  readonly status = 504
+  readonly txHash: string
+  readonly elapsedMs: number
+
+  constructor(txHash: string, elapsedMs: number) {
+    super(`Soroban transaction ${txHash} did not finalise within ${elapsedMs}ms`)
+    this.name = 'SorobanTimeoutError'
+    this.txHash = txHash
+    this.elapsedMs = elapsedMs
   }
 }
 
