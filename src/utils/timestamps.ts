@@ -7,6 +7,15 @@
 const ISO8601_WITH_TZ =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
+const TZ_DESIGNATOR = /(Z|[+-]\d{2}:\d{2})$/
+
+/**
+ * Returns true if the string ends with a timezone designator (Z or +/-HH:MM).
+ */
+export function hasTimezoneDesignator(value: string): boolean {
+  return TZ_DESIGNATOR.test(value)
+}
+
 /**
  * Validates that a value is a well-formed ISO 8601 datetime string
  * with a mandatory timezone designator (Z or ±HH:MM).
@@ -40,6 +49,13 @@ export function isValidISO8601(value: unknown): value is string {
  * Parses an ISO 8601 string with any timezone offset and returns
  * the equivalent UTC string ending in Z.
  * Throws if the input is not a valid ISO 8601 string with timezone.
+ *
+ * DST assumptions:
+ * - The offset in the timestamp string encodes whether DST was active
+ *   at that point in time (e.g., -04:00 for EDT, -05:00 for EST).
+ * - UTC conversion is deterministic: the offset is applied directly.
+ * - No timezone-name resolution is performed; DST state is already
+ *   implicit in the explicit offset.
  */
 export function parseAndNormalizeToUTC(value: string): string {
   if (!isValidISO8601(value)) {
@@ -60,6 +76,33 @@ export function parseAndNormalizeToUTC(value: string): string {
  */
 export function utcNow(): string {
   return new Date().toISOString()
+}
+
+/**
+ * Returns the start of value's UTC day (00:00:00.000Z).
+ * Useful for aggregating daily/weekly/monthly analytics.
+ */
+export function utcStartOfDay(value: string | Date = new Date()): string {
+  const date = typeof value === 'string' ? new Date(value) : value
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    0, 0, 0, 0
+  )).toISOString()
+}
+
+/**
+ * Returns the end of value's UTC day (23:59:59.999Z).
+ */
+export function utcEndOfDay(value: string | Date = new Date()): string {
+  const date = typeof value === 'string' ? new Date(value) : value
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    23, 59, 59, 999
+  )).toISOString()
 }
 
 export interface FormatTimestampOptions {

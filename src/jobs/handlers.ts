@@ -1,4 +1,7 @@
+import { NotificationService } from '../services/notifications/factory.js'
+import { processJob as processExportJob } from '../services/exportQueue.js'
 import type { JobHandler, JobType } from './types.js'
+import { markVaultExpiries } from '../services/vaultExpiry.service.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -16,20 +19,28 @@ const logJob = (type: JobType, message: string): void => {
 
 export const defaultJobHandlers: JobHandlerRegistry = {
   'notification.send': async (payload, context) => {
-    await sleep(40)
+    await NotificationService.send(payload.recipient, payload.subject, payload.body)
     logJob(
       'notification.send',
-      `sent recipient=${payload.recipient} subject="${payload.subject}" attempt=${context.attempt}`,
+      `executed job_id=${context.jobId} attempt=${context.attempt}`,
     )
   },
   'deadline.check': async (payload, context) => {
     await sleep(30)
+    const expiredCount = await markVaultExpiries()
     const target = payload.vaultId ?? 'all-active-vaults'
     const deadline = payload.deadlineIso ?? 'not-provided'
     logJob(
       'deadline.check',
-      `checked target=${target} deadline=${deadline} source=${payload.triggerSource} attempt=${context.attempt}`,
+      `checked target=${target} deadline=${deadline} expired=${expiredCount} source=${payload.triggerSource} attempt=${context.attempt}`,
     )
+    if (payload.vaultId) {
+      const sorobanPayload = buildSlashOnMissPayload(payload.vaultId)
+      logJob(
+        'deadline.check',
+        `slash_on_miss built vault=${payload.vaultId} status=${sorobanPayload.submission.status}`,
+      )
+    }
   },
   'oracle.call': async (payload, context) => {
     await sleep(60)
@@ -46,6 +57,13 @@ export const defaultJobHandlers: JobHandlerRegistry = {
     logJob(
       'analytics.recompute',
       `scope=${payload.scope} entity=${entity} reason=${reason} attempt=${context.attempt}`,
+    )
+  },
+  'export.generate': async (payload, context) => {
+    await processExportJob(payload.exportJobId, undefined, context.attempt)
+    logJob(
+      'export.generate',
+      `exportJobId=${payload.exportJobId} attempt=${context.attempt}`,
     )
   },
 }

@@ -1,15 +1,16 @@
 import { Request, Response, NextFunction } from 'express'
 import { verifyAccessToken } from '../lib/auth-utils.js'
+import { validateSession } from '../services/session.js'
 import { UserRole } from '../types/user.js'
 
-export const authenticate = (req: Request, res: Response, next: NextFunction) => {
+export const authenticate = async (req: Request, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization
 
     if (!authHeader?.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' })
     }
 
-    const token = authHeader.split(' ')[1]
+    const token = authHeader?.split(' ')[1]
 
     try {
         const payload = verifyAccessToken(token)
@@ -17,6 +18,8 @@ export const authenticate = (req: Request, res: Response, next: NextFunction) =>
             userId: payload.userId,
             role: payload.role as UserRole,
         }
+        const isValid = await validateSession(payload.jti || '')
+        if (!isValid) return res.status(401).json({ error: 'Unauthorized: Session revoked' })
         next()
     } catch (error) {
         return res.status(401).json({ error: 'Unauthorized: Token expired or invalid' })

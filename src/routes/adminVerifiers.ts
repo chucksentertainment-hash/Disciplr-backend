@@ -1,7 +1,18 @@
 import { Router, Request, Response } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { requireAdmin } from '../middleware/rbac.js'
-import { createOrGetVerifierProfile, listVerifierProfiles, getVerifierProfile, setVerifierStatus, getVerifierStats } from '../services/verifiers.js'
+import {
+  VerifierStatus,
+  createOrGetVerifierProfile,
+  createVerifierProfile,
+  deleteVerifierProfile,
+  getVerifierProfile,
+  getVerifierStats,
+  listVerifierProfiles,
+  InvalidVerifierStatusTransitionError,
+  transitionVerifier,
+  updateVerifierProfile,
+} from '../services/verifiers.js'
 
 export const adminVerifiersRouter = Router()
 
@@ -23,16 +34,175 @@ adminVerifiersRouter.get('/:userId', async (req: Request, res: Response) => {
   res.json({ profile: p, stats: await getVerifierStats(userId) })
 })
 
-adminVerifiersRouter.post('/:userId/approve', async (req: Request, res: Response) => {
+adminVerifiersRouter.post('/', async (req: Request, res: Response) => {
+  const { userId, displayName, metadata, status } = req.body as {
+    userId?: unknown
+    displayName?: unknown
+    metadata?: unknown
+    status?: unknown
+  }
+
+  if (typeof userId !== 'string' || userId.trim().length === 0) {
+    res.status(400).json({ error: 'userId is required' })
+    return
+  }
+
+  if (displayName !== undefined && displayName !== null && typeof displayName !== 'string') {
+    res.status(400).json({ error: 'displayName must be a string when provided' })
+    return
+  }
+
+  if (metadata !== undefined && metadata !== null && (typeof metadata !== 'object' || Array.isArray(metadata))) {
+    res.status(400).json({ error: 'metadata must be an object when provided' })
+    return
+  }
+
+  if (status !== undefined && !isVerifierStatus(status)) {
+    res.status(400).json({ error: 'invalid status' })
+    return
+  }
+
+  try {
+    const profile = await createVerifierProfile(userId.trim(), {
+      displayName: typeof displayName === 'string' ? displayName.trim() : undefined,
+      metadata: isRecord(metadata) ? metadata : undefined,
+      status: isVerifierStatus(status) ? status : undefined,
+    }, { actorUserId: req.user!.userId })
+
+    const stats = await getVerifierStats(profile.after.userId)
+    res.status(201).json({ profile: profile.after, stats, auditLogId: profile.auditLog?.id })
+  } catch (error) {
+    if (isDuplicateError(error)) {
+      res.status(409).json({ error: 'verifier already exists' })
+      return
+    }
+    res.status(500).json({ error: 'internal server error' })
+  }
+})
+
+adminVerifiersRouter.patch('/:userId', async (req: Request, res: Response) => {
   const userId = req.params.userId
-  await createOrGetVerifierProfile(userId)
-  const updated = await setVerifierStatus(userId, 'approved')
-  res.json({ profile: updated, stats: await getVerifierStats(userId) })
+  const { displayName, metadata, status } = req.body as {
+    displayName?: unknown
+    metadata?: unknown
+    status?: unknown
+  }
+
+  if (displayName !== undefined && displayName !== null && typeof displayName !== 'string') {
+    res.status(400).json({ error: 'displayName must be a string when provided' })
+    return
+  }
+
+  if (metadata !== undefined && metadata !== null && (typeof metadata !== 'object' || Array.isArray(metadata))) {
+    res.status(400).json({ error: 'metadata must be an object when provided' })
+    return
+  }
+
+  if (status !== undefined && !isVerifierStatus(status)) {
+    res.status(400).json({ error: 'invalid status' })
+    return
+  }
+
+  let profile
+  try {
+    profile = await updateVerifierProfile(userId, {
+      displayName: typeof displayName === 'string' ? displayName.trim() : displayName === null ? null : undefined,
+      metadata: isRecord(metadata) ? metadata : metadata === null ? null : undefined,
+      status: isVerifierStatus(status) ? status : undefined,
+    }, { actorUserId: req.user!.userId })
+  } catch (error) {
+    if (error instanceof InvalidVerifierStatusTransitionError) {
+      res.status(409).json({ error: error.message })
+      return
+    }
+    res.status(500).json({ error: 'internal server error' })
+    return
+  }
+
+  if (!profile) {
+    res.status(404).json({ error: 'verifier not found' })
+    return
+  }
+
+  const stats = await getVerifierStats(userId)
+  res.json({ profile: profile.after, stats, auditLogId: profile.auditLog?.id ?? null, changedFields: profile.changedFields })
+})
+
+adminVerifiersRouter.delete('/:userId', async (req: Request, res: Response) => {
+  const userId = req.params.userId
+  const result = await deleteVerifierProfile(userId, { actorUserId: req.user!.userId })
+
+  if (!result.deleted) {
+    res.status(404).json({ error: 'verifier not found' })
+    return
+  }
+
+  res.status(204).send()
+})
+
+adminVerifiersRouter.post('/:userId/approve', async (req: Request, res: Response) => {
+  await createOrGetAndTransitionStatus(req, res, req.params.userId, 'approved')
 })
 
 adminVerifiersRouter.post('/:userId/suspend', async (req: Request, res: Response) => {
-  const userId = req.params.userId
-  await createOrGetVerifierProfile(userId)
-  const updated = await setVerifierStatus(userId, 'suspended')
-  res.json({ profile: updated, stats: await getVerifierStats(userId) })
+  await createOrGetAndTransitionStatus(req, res, req.params.userId, 'suspended')
 })
+
+adminVerifiersRouter.post('/:userId/deactivate', async (req: Request, res: Response) => {
+  await transitionStatus(req, res, req.params.userId, 'deactivated')
+})
+
+adminVerifiersRouter.post('/:userId/reactivate', async (req: Request, res: Response) => {
+  await transitionStatus(req, res, req.params.userId, 'pending')
+})
+
+const isVerifierStatus = (value: unknown): value is VerifierStatus =>
+  value === 'pending' || value === 'approved' || value === 'suspended' || value === 'deactivated'
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isDuplicateError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') {
+    return false
+  }
+
+  const maybeErr = error as { code?: string; constraint?: string; message?: string }
+  return maybeErr.code === '23505'
+    || maybeErr.code === 'SQLITE_CONSTRAINT'
+    || maybeErr.constraint === 'verifiers_pkey'
+    || maybeErr.message?.toLowerCase().includes('unique') === true
+}
+const transitionStatus = async (req: Request, res: Response, userId: string, status: VerifierStatus): Promise<void> => {
+  try {
+    const updated = await transitionVerifier(userId, status, { actorUserId: req.user!.userId })
+    if (!updated) {
+      res.status(404).json({ error: 'verifier not found' })
+      return
+    }
+    res.json({
+      profile: updated.after,
+      stats: await getVerifierStats(userId),
+      auditLogId: updated.auditLog?.id ?? null,
+      changedFields: updated.changedFields,
+    })
+  } catch (error) {
+    if (error instanceof InvalidVerifierStatusTransitionError) {
+      res.status(409).json({ error: error.message })
+      return
+    }
+
+    res.status(500).json({ error: 'internal server error' })
+  }
+}
+
+const createOrGetAndTransitionStatus = async (req: Request, res: Response, userId: string, status: VerifierStatus): Promise<void> => {
+  try {
+    await createOrGetVerifierProfile(userId, undefined, { actorUserId: req.user!.userId })
+  } catch {
+    res.status(500).json({ error: 'internal server error' })
+    return
+  }
+
+  await transitionStatus(req, res, userId, status)
+}

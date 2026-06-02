@@ -48,3 +48,8 @@ jobs:
 
       - name: Migration status
         run: npm run migrate:status
+
+      - name: Test
+        run: npm test
+        env:
+          NODE_ENV: test

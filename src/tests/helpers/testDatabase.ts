@@ -26,7 +26,12 @@ export interface DbState {
 export async function setupTestDatabase(): Promise<Knex> {
   const db = knex({
     client: 'pg',
-    connection: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/disciplr_test'
+    connection: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/disciplr_test',
+    migrations: {
+      directory: './db/migrations',
+      extension: 'cjs',
+      tableName: 'knex_migrations',
+    },
   })
 
   // Run migrations to ensure schema is up to date

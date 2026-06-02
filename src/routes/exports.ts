@@ -1,164 +1,202 @@
-import { Router, Response } from 'express'
-import { authenticate, requireAdmin, signDownloadToken, verifyDownloadToken, AuthenticatedRequest } from '../middleware/auth.js'
-import { createJob, getJob, processJob, ExportFormat, ExportScope } from '../services/exportQueue.js'
+import { Router, type Response } from 'express'
+import type { BackgroundJobSystem } from '../jobs/system.js'
+import {
+  authenticate,
+  requireAdmin,
+  signDownloadToken,
+  verifyDownloadToken,
+  type AuthenticatedRequest,
+} from '../middleware/auth.js'
+import { requireScopes } from '../middleware/apiKeyAuth.js'
+import { ApiScope } from '../types/auth.js'
+import {
+  enqueueExportJob,
+  getJob,
+  isExportIdempotencyConflictError,
+  type ExportFormat,
+  type ExportScope,
+} from '../services/exportQueue.js'
+import { checkAndIncrementExportQuota } from '../services/exportQuota.js'
+import { getEnv } from '../config/index.js'
 
-/**
- * The vaults store is shared with vaults.ts.
- * In a real app both modules query the same DB; here we accept it as a parameter
- * so the router factory stays testable without globals.
- */
-export function createExportRouter(
-    vaultsStore: Array<Record<string, unknown>>,
-): Router {
-    const router = Router()
+const resolveOrgId = (req: AuthenticatedRequest): string =>
+  (req as any).orgId as string | undefined ?? req.user!.userId
 
-    function parseOptions(req: AuthenticatedRequest): { format: ExportFormat; scope: ExportScope } | null {
-        const format = (req.query['format'] ?? 'json') as string
-        const scope = (req.query['scope'] ?? 'all') as string
+const enforceExportQuota = async (
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<boolean> => {
+  const orgId = resolveOrgId(req)
+  const result = await checkAndIncrementExportQuota(orgId, getEnv().EXPORT_DAILY_QUOTA_LIMIT)
+  if (!result.allowed) {
+    res.setHeader('Retry-After', String(result.retryAfter))
+    res.status(429).json({
+      error: 'Export quota exceeded. Try again tomorrow.',
+      retryAfter: result.retryAfter,
+    })
+    return false
+  }
+  return true
+}
 
-        const validFormats = ['csv', 'json']
-        const validScopes = ['vaults', 'transactions', 'analytics', 'all']
+export function createExportRouter(jobSystem: BackgroundJobSystem): Router {
+  const router = Router()
 
-        if (!validFormats.includes(format) || !validScopes.includes(scope)) return null
+  const parseOptions = (req: AuthenticatedRequest): { format: ExportFormat; scope: ExportScope } | null => {
+    const format = (req.query.format ?? 'json') as string
+    const scope = (req.query.scope ?? 'all') as string
 
-        return { format: format as ExportFormat, scope: scope as ExportScope }
+    const validFormats = ['csv', 'json']
+    const validScopes = ['vaults', 'transactions', 'analytics', 'all']
+
+    if (!validFormats.includes(format) || !validScopes.includes(scope)) {
+      return null
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // POST /api/exports/me  — authenticated user requests their own export
-    // ─────────────────────────────────────────────────────────────────────────────
-    /**
-     * @query format  csv | json  (default: json)
-     * @query scope   vaults | transactions | analytics | all  (default: all)
-     *
-     * Returns { jobId, statusUrl, pollIntervalMs }
-     */
-    router.post('/me', authenticate, (req: AuthenticatedRequest, res: Response) => {
-        const opts = parseOptions(req)
-        if (!opts) {
-            res.status(400).json({ error: 'Invalid format or scope parameter' })
-            return
-        }
+    return { format: format as ExportFormat, scope: scope as ExportScope }
+  }
 
-        const job = createJob({
-            userId: req.user!.userId,
-            isAdmin: false,
-            scope: opts.scope,
-            format: opts.format,
-        })
+  const buildAcceptedResponse = (jobId: string) => ({
+    jobId,
+    statusUrl: `/api/exports/status/${jobId}`,
+    pollIntervalMs: 1000,
+  })
 
-        // Fire-and-forget background processing
-        processJob(job.id, vaultsStore).catch(console.error)
+  router.post('/me', authenticate, requireScopes(ApiScope.ReadAnalytics, ApiScope.ReadVaults), async (req: AuthenticatedRequest, res: Response) => {
+    const options = parseOptions(req)
+    if (!options) {
+      res.status(400).json({ error: 'Invalid format or scope parameter' })
+      return
+    }
 
-        res.status(202).json({
-            jobId: job.id,
-            statusUrl: `/api/exports/status/${job.id}`,
-            pollIntervalMs: 1000,
-        })
+    if (!await enforceExportQuota(req, res)) return
+
+    try {
+      const job = await enqueueExportJob(jobSystem, {
+        userId: req.user!.userId,
+        isAdmin: false,
+        scope: options.scope,
+        format: options.format,
+        idempotencyKey: req.header('idempotency-key') ?? undefined,
+      })
+
+      res.status(202).json(buildAcceptedResponse(job.id))
+    } catch (error) {
+      if (isExportIdempotencyConflictError(error)) {
+        res.status(409).json({ error: error.message })
+        return
+      }
+
+      const message = error instanceof Error ? error.message : 'Failed to enqueue export job'
+      res.status(500).json({ error: message })
+    }
+  })
+
+  router.post('/admin', authenticate, requireAdmin, requireScopes(ApiScope.ReadAnalytics, ApiScope.ReadVaults), async (req: AuthenticatedRequest, res: Response) => {
+    const options = parseOptions(req)
+    if (!options) {
+      res.status(400).json({ error: 'Invalid format or scope parameter' })
+      return
+    }
+
+    if (!await enforceExportQuota(req, res)) return
+
+    const targetUserId =
+      typeof req.query.targetUserId === 'string' ? req.query.targetUserId : undefined
+
+    try {
+      const job = await enqueueExportJob(jobSystem, {
+        userId: req.user!.userId,
+        isAdmin: true,
+        targetUserId,
+        scope: options.scope,
+        format: options.format,
+        idempotencyKey: req.header('idempotency-key') ?? undefined,
+      })
+
+      res.status(202).json(buildAcceptedResponse(job.id))
+    } catch (error) {
+      if (isExportIdempotencyConflictError(error)) {
+        res.status(409).json({ error: error.message })
+        return
+      }
+
+      const message = error instanceof Error ? error.message : 'Failed to enqueue export job'
+      res.status(500).json({ error: message })
+    }
+  })
+
+  router.get('/status/:jobId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    const job = await getJob(req.params.jobId)
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' })
+      return
+    }
+
+    if (req.user!.role !== 'ADMIN' && job.userId !== req.user!.userId) {
+      res.status(403).json({ error: 'Access denied' })
+      return
+    }
+
+    if (job.status !== 'done') {
+      res.json({
+        jobId: job.id,
+        status: job.status,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        ...(job.error ? { error: job.error } : {}),
+      })
+      return
+    }
+
+    const downloadToken = signDownloadToken(job.id, job.userId, 3600)
+
+    res.json({
+      jobId: job.id,
+      status: 'done',
+      attempts: job.attempts,
+      maxAttempts: job.maxAttempts,
+      completedAt: job.completedAt,
+      downloadUrl: `/api/exports/download/${downloadToken}`,
+      expiresInSeconds: 3600,
     })
+  })
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // POST /api/exports/admin  — admin requests export for any / all users
-    // ─────────────────────────────────────────────────────────────────────────────
-    /**
-     * @query format        csv | json  (default: json)
-     * @query scope         vaults | transactions | analytics | all  (default: all)
-     * @query targetUserId  (optional) limit export to a single user's data
-     */
-    router.post(
-        '/admin',
-        authenticate,
-        requireAdmin,
-        (req: AuthenticatedRequest, res: Response) => {
-            const opts = parseOptions(req)
-            if (!opts) {
-                res.status(400).json({ error: 'Invalid format or scope parameter' })
-                return
-            }
+  router.get('/download/:token', async (req, res: Response) => {
+    const verified = verifyDownloadToken(req.params.token)
+    if (!verified) {
+      res.status(401).json({ error: 'Invalid or expired download token' })
+      return
+    }
 
-            const targetUserId =
-                typeof req.query['targetUserId'] === 'string'
-                    ? req.query['targetUserId']
-                    : undefined
+    const job = await getJob(verified.jobId)
+    if (!job || job.userId !== verified.userId || job.status !== 'done' || !job.result) {
+      res.status(404).json({ error: 'Export not ready or not found' })
+      return
+    }
 
-            const job = createJob({
-                userId: req.user!.userId,
-                isAdmin: true,
-                targetUserId,
-                scope: opts.scope,
-                format: opts.format,
-            })
+    const mimeType = job.format === 'csv'
+      ? 'text/csv; charset=utf-8'
+      : 'application/json; charset=utf-8'
 
-            processJob(job.id, vaultsStore).catch(console.error)
+    res.setHeader('Content-Type', mimeType)
+    res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`)
+    res.setHeader('Content-Length', job.result.length)
 
-            res.status(202).json({
-                jobId: job.id,
-                statusUrl: `/api/exports/status/${job.id}`,
-                pollIntervalMs: 1000,
-            })
-        },
+    console.info(
+      JSON.stringify({
+        level: 'info',
+        event: 'exports.download_served',
+        jobId: job.id,
+        format: job.format,
+        bytes: job.result.length,
+        filename: job.filename,
+        timestamp: new Date().toISOString(),
+      }),
     )
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // GET /api/exports/status/:jobId  — poll job status, get signed download link
-    // ─────────────────────────────────────────────────────────────────────────────
-    router.get('/status/:jobId', authenticate, (req: AuthenticatedRequest, res: Response) => {
-        const job = getJob(req.params['jobId'])
+    res.send(job.result)
+  })
 
-        if (!job) {
-            res.status(404).json({ error: 'Job not found' })
-            return
-        }
-
-        // Users may only check their own jobs; admins may check any
-        if (req.user!.role !== 'ADMIN' && job.userId !== req.user!.userId) {
-            res.status(403).json({ error: 'Access denied' })
-            return
-        }
-
-        if (job.status !== 'done') {
-            res.json({
-                jobId: job.id,
-                status: job.status,
-                ...(job.error ? { error: job.error } : {}),
-            })
-            return
-        }
-
-        // Issue a short-lived signed download token (1 hour)
-        const downloadToken = signDownloadToken(job.id, job.userId, 3600)
-
-        res.json({
-            jobId: job.id,
-            status: 'done',
-            completedAt: job.completedAt,
-            downloadUrl: `/api/exports/download/${downloadToken}`,
-            expiresInSeconds: 3600,
-        })
-    })
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // GET /api/exports/download/:token  — secure file download (no auth cookie needed)
-    // ─────────────────────────────────────────────────────────────────────────────
-    router.get('/download/:token', (req, res: Response) => {
-        const verified = verifyDownloadToken(req.params['token'])
-        if (!verified) {
-            res.status(401).json({ error: 'Invalid or expired download token' })
-            return
-        }
-
-        const job = getJob(verified.jobId)
-        if (!job || job.status !== 'done' || !job.result) {
-            res.status(404).json({ error: 'Export not ready or not found' })
-            return
-        }
-
-        const mimeType = job.format === 'csv' ? 'text/csv' : 'application/json'
-        res.setHeader('Content-Type', mimeType)
-        res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`)
-        res.setHeader('Content-Length', job.result.length)
-        res.send(job.result)
-    })
-
-    return router
+  return router
 }

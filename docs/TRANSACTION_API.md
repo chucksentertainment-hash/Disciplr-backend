@@ -47,8 +47,10 @@ The `TransactionETLService` handles:
   - `vault_id`: Filter by vault ID
   - `date_from`, `date_to`: Date range filter
   - `amount_min`, `amount_max`: Amount range filter
-  - `page`, `pageSize`: Pagination
-  - `sortBy`, `sortOrder`: Sorting options
+  - `page`: Page number for page-based pagination
+  - `limit`: Number of items per page (default: 20, max: 100)
+  - `cursor`: Opaque cursor for cursor-based pagination
+  - `sortBy`, `sortOrder`: Sorting options (for page-based)
 
 #### GET /api/transactions/:id
 - Returns specific transaction details
@@ -200,19 +202,27 @@ DEBUG=etl:* npm run dev
 ### Get User Transactions
 
 ```bash
-curl -H "x-user-id: user-123" \
+curl -H "Authorization: Bearer <token>" \
   "http://localhost:3000/api/transactions?page=1&pageSize=20&type=release"
+```
+
+### Get Transaction by ID
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:3000/api/transactions/<transaction-id>"
 ```
 
 ### Get Vault Transactions
 
 ```bash
-curl -H "x-user-id: user-123" \
-  "http://localhost:3000/api/transactions/vault/vault-456?date_from=2026-02-01"
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:3000/api/transactions/vault/<vault-id>?date_from=2026-02-01"
 ```
 
 ### Response Format
 
+#### List Response (Cursor-based)
 ```json
 {
   "data": [
@@ -223,17 +233,52 @@ curl -H "x-user-id: user-123" \
       "amount": "100.0000000",
       "asset_code": "XLM",
       "tx_hash": "abcdef...",
-      "explorer_url": "https://stellar.expert/explorer/public/tx/abcdef",
+      "from_account": "G...",
+      "to_account": "G...",
+      "memo": "optional memo",
       "created_at": "2026-02-26T12:00:00Z",
+      "stellar_ledger": 12345,
       "stellar_timestamp": "2026-02-26T12:00:00Z",
-      "stellar_ledger": 12345
+      "explorer_url": "https://stellar.expert/explorer/public/tx/abcdef"
     }
   ],
   "pagination": {
-    "page": 1,
-    "pageSize": 20,
-    "total": 100,
+    "limit": 20,
+    "next_cursor": "base64-encoded-cursor",
     "has_more": true
   }
+}
+```
+
+#### List Response (Page-based)
+```json
+{
+  "data": [...],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 100,
+    "total_pages": 5,
+    "has_more": true
+  }
+}
+```
+
+#### Single Transaction Response
+```json
+{
+  "id": "uuid",
+  "vault_id": "vault-uuid",
+  "type": "release",
+  "amount": "100.0000000",
+  "asset_code": "XLM",
+  "tx_hash": "abcdef...",
+  "from_account": "G...",
+  "to_account": "G...",
+  "memo": "optional memo",
+  "created_at": "2026-02-26T12:00:00Z",
+  "stellar_ledger": 12345,
+  "stellar_timestamp": "2026-02-26T12:00:00Z",
+  "explorer_url": "https://stellar.expert/explorer/public/tx/abcdef"
 }
 ```

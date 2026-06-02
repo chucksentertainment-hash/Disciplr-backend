@@ -1,6 +1,7 @@
 import { defaultJobHandlers } from './handlers.js'
 import { InMemoryJobQueue, type QueueMetrics, type QueuedJobReceipt } from './queue.js'
 import { type EnqueueOptions, type JobPayloadByType, type JobType } from './types.js'
+import { recoverPendingExportJobs } from '../services/exportQueue.js'
 
 const parsePositiveInteger = (value: string | undefined, fallback: number): number => {
   if (!value) {
@@ -19,6 +20,7 @@ export class BackgroundJobSystem {
   private readonly queue: InMemoryJobQueue
   private readonly scheduleTimers: NodeJS.Timeout[] = []
   private started = false
+  private shuttingDown = false
 
   constructor() {
     this.queue = new InMemoryJobQueue({
@@ -31,6 +33,7 @@ export class BackgroundJobSystem {
     this.queue.registerHandler('deadline.check', defaultJobHandlers['deadline.check'])
     this.queue.registerHandler('oracle.call', defaultJobHandlers['oracle.call'])
     this.queue.registerHandler('analytics.recompute', defaultJobHandlers['analytics.recompute'])
+    this.queue.registerHandler('export.generate', defaultJobHandlers['export.generate'])
   }
 
   start(): void {
@@ -39,11 +42,17 @@ export class BackgroundJobSystem {
     }
 
     this.started = true
+    this.shuttingDown = false
     this.queue.start()
     this.scheduleRecurringJobs()
+    void recoverPendingExportJobs(this).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[jobs:export.generate] failed to recover pending exports: ${message}`)
+    })
   }
 
   async stop(): Promise<void> {
+    this.shuttingDown = true
     for (const timer of this.scheduleTimers) {
       clearInterval(timer)
     }
@@ -57,7 +66,25 @@ export class BackgroundJobSystem {
     payload: JobPayloadByType[JobType],
     options: EnqueueOptions = {},
   ): QueuedJobReceipt<JobType> {
+    if (this.shuttingDown) {
+      throw new Error('Cannot enqueue job: system is shutting down')
+    }
     return this.queue.enqueue(type, payload, options)
+  }
+
+  getDeadLetters() {
+    return this.queue.getDeadLetters()
+  }
+
+  getDeadLetter(jobId: string) {
+    return this.queue.getDeadLetter(jobId)
+  }
+
+  replayDeadLetter(jobId: string): QueuedJobReceipt<JobType> {
+    if (this.shuttingDown) {
+      throw new Error('Cannot replay dead-letter job: system is shutting down')
+    }
+    return this.queue.replayDeadLetter(jobId)
   }
 
   getMetrics(): QueueMetrics {

@@ -1,14 +1,19 @@
-import { UserRole } from '@prisma/client'
+import { UserRole } from './user.js'
 
 export interface AuthenticatedUser {
   userId: string
+}
+
+export enum ApiScope {
+  ReadAnalytics = 'read:analytics',
+  ReadVaults = 'read:vaults',
 }
 
 export interface ApiKeyAuthContext {
   apiKeyId: string
   userId: string | null
   orgId: string | null
-  scopes: string[]
+  scopes: ApiScope[]
   label: string
 }
 
@@ -18,7 +23,7 @@ export interface ApiKeyRecord {
   orgId: string | null
   keyHash: string
   label: string
-  scopes: string[]
+  scopes: ApiScope[]
   createdAt: string
   revokedAt: string | null
 }
@@ -28,6 +33,8 @@ export interface JWTPayload {
   role: UserRole
   email?: string
   jti?: string
+  isEnterprise?: boolean
+  enterpriseId?: string
 }
 
 declare global {

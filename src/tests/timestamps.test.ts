@@ -1,9 +1,14 @@
+import { jest } from '@jest/globals'
 import {
+  hasTimezoneDesignator,
   isValidISO8601,
   parseAndNormalizeToUTC,
+  utcEndOfDay,
   utcNow,
+  utcStartOfDay,
   formatTimestamp,
 } from '../utils/timestamps.js'
+import { utcTimestampSchema } from '../lib/validation.js'
 
 // ── isValidISO8601 ──────────────────────────────────────────────
 
@@ -52,6 +57,18 @@ describe('isValidISO8601', () => {
     expect(isValidISO8601('2025-13-15T12:00:00Z')).toBe(false)
   })
 
+  it('rejects invalid hour (24)', () => {
+    expect(isValidISO8601('2025-06-15T24:00:00Z')).toBe(false)
+  })
+
+  it('rejects invalid minute (60)', () => {
+    expect(isValidISO8601('2025-06-15T12:60:00Z')).toBe(false)
+  })
+
+  it('rejects invalid second (60)', () => {
+    expect(isValidISO8601('2025-06-15T12:00:60Z')).toBe(false)
+  })
+
   it('rejects impossible day (Feb 30)', () => {
     expect(isValidISO8601('2025-02-30T12:00:00Z')).toBe(false)
   })
@@ -66,6 +83,23 @@ describe('isValidISO8601', () => {
 
   it('rejects Feb 29 in a non-leap year', () => {
     expect(isValidISO8601('2025-02-29T00:00:00Z')).toBe(false)
+  })
+})
+
+// ── hasTimezoneDesignator ─────────────────────────────────────
+
+describe('hasTimezoneDesignator', () => {
+  it('accepts Z suffix', () => {
+    expect(hasTimezoneDesignator('2025-06-15T12:30:00Z')).toBe(true)
+  })
+
+  it('accepts numeric offsets', () => {
+    expect(hasTimezoneDesignator('2025-06-15T12:30:00+05:30')).toBe(true)
+    expect(hasTimezoneDesignator('2025-06-15T12:30:00-04:00')).toBe(true)
+  })
+
+  it('rejects timestamps without timezone', () => {
+    expect(hasTimezoneDesignator('2025-06-15T12:30:00')).toBe(false)
   })
 })
 
@@ -94,6 +128,106 @@ describe('parseAndNormalizeToUTC', () => {
   it('throws on timestamp without timezone', () => {
     expect(() => parseAndNormalizeToUTC('2025-06-15T12:30:00')).toThrow('Invalid ISO 8601 timestamp')
   })
+
+  it('throws on unparseable timestamp with invalid offset', () => {
+    expect(() => parseAndNormalizeToUTC('2025-01-01T00:00:00+99:99')).toThrow('Unparseable timestamp')
+  })
+
+  // DST edge cases: explicit offsets encode DST state at parse time.
+  // Same local time with different offsets yields different UTC times.
+
+  it('handles US Eastern DST fall-back (EDT->EST)', () => {
+    // 2025-11-02 01:30 AM EDT (DST active, offset -04:00)
+    const edt = parseAndNormalizeToUTC('2025-11-02T01:30:00-04:00')
+    expect(edt).toBe('2025-11-02T05:30:00.000Z')
+    // 2025-11-02 01:30 AM EST (DST ended, offset -05:00)
+    // Same local time, different offset = different UTC
+    const est = parseAndNormalizeToUTC('2025-11-02T01:30:00-05:00')
+    expect(est).toBe('2025-11-02T06:30:00.000Z')
+    expect(edt).not.toBe(est)
+  })
+
+  it('handles US Eastern DST spring-forward (EST->EDT)', () => {
+    // 2025-03-09 01:59 AM EST (last moment before DST)
+    const est = parseAndNormalizeToUTC('2025-03-09T01:59:00-05:00')
+    expect(est).toBe('2025-03-09T06:59:00.000Z')
+    // 2025-03-09 03:00 AM EDT (first moment after DST spring-forward)
+    // 2:00-3:00 AM does not exist; explicit offset -04:00 handles this
+    const edt = parseAndNormalizeToUTC('2025-03-09T03:00:00-04:00')
+    expect(edt).toBe('2025-03-09T07:00:00.000Z')
+  })
+
+  it('handles Southern Hemisphere DST (Australia)', () => {
+    // 2025-04-06 02:30 AM AEDT (DST active, offset +11:00)
+    const aedt = parseAndNormalizeToUTC('2025-04-06T02:30:00+11:00')
+    expect(aedt).toBe('2025-04-05T15:30:00.000Z')
+    // 2025-04-06 02:30 AM AEST (DST ended, offset +10:00)
+    const aest = parseAndNormalizeToUTC('2025-04-06T02:30:00+10:00')
+    expect(aest).toBe('2025-04-05T16:30:00.000Z')
+    expect(aedt).not.toBe(aest)
+  })
+
+  it('handles Europe London DST (GMT->BST)', () => {
+    // 2025-03-30 01:00 GMT (last moment before BST starts)
+    const gmt = parseAndNormalizeToUTC('2025-03-30T01:00:00+00:00')
+    expect(gmt).toBe('2025-03-30T01:00:00.000Z')
+    // 2025-03-30 02:00 BST (DST active, offset +01:00)
+    const bst = parseAndNormalizeToUTC('2025-03-30T02:00:00+01:00')
+    expect(bst).toBe('2025-03-30T01:00:00.000Z')
+  })
+
+  it('handles timestamps with milliseconds during DST transition', () => {
+    const result = parseAndNormalizeToUTC('2025-11-02T01:30:00.500-04:00')
+    expect(result).toBe('2025-11-02T05:30:00.500Z')
+  })
+
+  it('handles positive offset during DST transition', () => {
+    // 2025-03-30 02:00 BST (Europe/London DST starts, offset +01:00)
+    const result = parseAndNormalizeToUTC('2025-03-30T02:00:00+01:00')
+    expect(result).toBe('2025-03-30T01:00:00.000Z')
+  })
+
+  it('handles large positive offset (Pacific/Honolulu, no DST)', () => {
+    // Hawaii doesn't observe DST; offset is always -10:00
+    const result = parseAndNormalizeToUTC('2025-06-15T12:30:00-10:00')
+    expect(result).toBe('2025-06-15T22:30:00.000Z')
+  })
+
+  it('handles large positive offset (Pacific/Auckland, Southern Hemisphere DST)', () => {
+    // New Zealand DST: +13:00 during summer (Dec 25 is summer in Southern Hemisphere)
+    // 12:00 - 13:00 = -1:00 = 23:00 previous day UTC
+    const summer = parseAndNormalizeToUTC('2025-12-25T12:00:00+13:00')
+    expect(summer).toBe('2025-12-24T23:00:00.000Z')
+    // New Zealand winter: +12:00 (June 15 is winter in Southern Hemisphere)
+    // 12:00 - 12:00 = 00:00 same day UTC
+    const winter = parseAndNormalizeToUTC('2025-06-15T12:00:00+12:00')
+    expect(winter).toBe('2025-06-15T00:00:00.000Z')
+  })
+})
+
+// ── utcTimestampSchema ────────────────────────────────────────
+
+describe('utcTimestampSchema', () => {
+  it('normalizes offset timestamps to Z', () => {
+    const result = utcTimestampSchema.parse('2025-06-15T08:30:00-04:00')
+    expect(result).toBe('2025-06-15T12:30:00.000Z')
+  })
+
+  it('rejects missing timezone with a clear error', () => {
+    const result = utcTimestampSchema.safeParse('2025-06-15T12:30:00')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe('must include timezone (Z or +/-HH:MM)')
+    }
+  })
+
+  it('rejects impossible dates even with timezone', () => {
+    const result = utcTimestampSchema.safeParse('2025-02-30T12:00:00Z')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe('must be a valid ISO 8601 timestamp')
+    }
+  })
 })
 
 // ── utcNow ─────────────────────────────────────────────────────
@@ -112,6 +246,30 @@ describe('utcNow', () => {
     const ts = new Date(now).getTime()
     expect(ts).toBeGreaterThanOrEqual(before)
     expect(ts).toBeLessThanOrEqual(after)
+  })
+})
+
+// ── utcStartOfDay / utcEndOfDay ───────────────────────────────
+
+describe('utcStartOfDay and utcEndOfDay', () => {
+  it('returns start and end of the UTC day for ISO input', () => {
+    const input = '2026-04-25T12:34:56.789Z'
+    expect(utcStartOfDay(input)).toBe('2026-04-25T00:00:00.000Z')
+    expect(utcEndOfDay(input)).toBe('2026-04-25T23:59:59.999Z')
+  })
+
+  it('accepts Date input', () => {
+    const input = new Date('2026-04-25T12:34:56.789Z')
+    expect(utcStartOfDay(input)).toBe('2026-04-25T00:00:00.000Z')
+    expect(utcEndOfDay(input)).toBe('2026-04-25T23:59:59.999Z')
+  })
+
+  it('defaults to the current UTC day when no value is provided', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-04-25T12:34:56.789Z'))
+    expect(utcStartOfDay()).toBe('2026-04-25T00:00:00.000Z')
+    expect(utcEndOfDay()).toBe('2026-04-25T23:59:59.999Z')
+    jest.useRealTimers()
   })
 })
 
