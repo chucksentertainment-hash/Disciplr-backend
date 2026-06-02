@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from 'express'
 import { authenticate } from '../middleware/auth.middleware.js'
+import { requireScopes } from '../middleware/apiKeyAuth.js'
+import { ApiScope } from '../types/auth.js'
 import { UserRole } from '../types/user.js'
 import { VaultService } from '../services/vault.service.js'
 import { applyFilters, applySort, paginateArray } from '../utils/pagination.js'
@@ -12,7 +14,7 @@ import {
   IdempotencyConflictError,
 } from '../services/idempotency.js'
 import { buildVaultCreationPayload } from '../services/soroban.js'
-import { createVaultWithMilestones, getVaultById, listVaults, cancelVaultById } from '../services/vaultStore.js'
+import { createVaultWithMilestones, getVaultById, listVaults, cancelVaultById, updateVaultById, getVaultRevisionById } from '../services/vaultStore.js'
 import { createVaultSchema, flattenZodErrors } from '../services/vaultValidation.js'
 import { queryParser } from '../middleware/queryParser.js'
 import { utcNow } from '../utils/timestamps.js'
@@ -41,6 +43,7 @@ export interface Vault {
 vaultsRouter.get(
   '/',
   authenticate,
+  requireScopes(ApiScope.ReadVaults),
   queryParser({
     allowedSortFields: ['createdAt', 'amount', 'endTimestamp', 'status'],
     allowedFilterFields: ['status', 'creator'],
@@ -123,7 +126,7 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
 // ─── GET /api/vaults/:id ─────────────────────────────────────────────────────
 
 // GET /api/vaults/:id
-vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
+vaultsRouter.get('/:id', authenticate, requireScopes(ApiScope.ReadVaults), async (req: Request, res: Response) => {
   // Try DB-backed store first (falls back to in-memory automatically)
   try {
     const vault = await getVaultById(req.params.id)
@@ -144,6 +147,30 @@ vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
   
   // Return the vault found in legacy in-memory storage
   res.json(vault)
+})
+
+// PATCH /api/vaults/:id — optimistic-lock update; requires X-Vault-Revision header
+vaultsRouter.patch('/:id', authenticate, async (req: Request, res: Response) => {
+  const revision = req.header('x-vault-revision') ?? ''
+  if (!revision) {
+    res.status(400).json({ error: 'X-Vault-Revision header is required' })
+    return
+  }
+
+  try {
+    const updated = await updateVaultById(req.params.id, revision, req.body)
+    res.json(updated)
+  } catch (err: any) {
+    if (err?.status === 409) {
+      res.status(409).json({ error: err.message ?? 'Vault update conflict' })
+      return
+    }
+    if (err?.status === 400) {
+      res.status(400).json({ error: err.message })
+      return
+    }
+    res.status(500).json({ error: 'Failed to update vault' })
+  }
 })
 
 // POST /api/vaults/:id/cancel
@@ -172,7 +199,7 @@ vaultsRouter.post('/:id/cancel', authenticate, async (req, res) => {
 })
 
 // GET /api/vaults/user/:address 
-vaultsRouter.get('/user/:address', authenticate, async (req: Request, res: Response) => {
+vaultsRouter.get('/user/:address', authenticate, requireScopes(ApiScope.ReadVaults), async (req: Request, res: Response) => {
   try {
     const userVaults = await VaultService.getVaultsByUser(req.params.address)
     res.json(userVaults)

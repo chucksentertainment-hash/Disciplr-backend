@@ -1,5 +1,6 @@
 import { vaults, type Vault } from '../routes/vaults.js';
 import { allMilestonesVerified } from './milestones.js';
+import { type Knex } from 'knex';
 
 type TerminalStatus = 'completed' | 'failed' | 'cancelled';
 
@@ -10,7 +11,8 @@ export interface TransitionResult {
 
 const ALLOWED_TRANSITIONS: Record<string, string[]> = {
   draft: ['active', 'cancelled'],
-  active: ['completed', 'failed', 'cancelled'],
+  active: ['completed', 'failed', 'cancelled', 'disputed'],
+  disputed: ['active', 'completed', 'failed'],
   completed: [],
   failed: [],
   cancelled: [],
@@ -123,6 +125,35 @@ export const getAllowedNextStates = (vaultId: string): string[] => {
   return ALLOWED_TRANSITIONS[vault.status] || [];
 };
 
+export const transitionVaultStatus = async (
+  trx: Knex.Transaction,
+  vaultId: string,
+  targetStatus: TerminalStatus,
+): Promise<TransitionResult> => {
+  const vault = await trx('vaults').where({ id: vaultId }).first()
+  if (!vault) {
+    return { success: false, error: 'Vault not found' }
+  }
+
+  if (TERMINAL_STATUSES.has(vault.status)) {
+    return { success: false, error: `Vault is already '${vault.status}' and cannot transition` }
+  }
+
+  if (!isValidTransition(vault.status, targetStatus)) {
+    const allowed = ALLOWED_TRANSITIONS[vault.status]
+    return {
+      success: false,
+      error: `Invalid transition: '${vault.status}' -> '${targetStatus}'. Allowed: ${allowed?.join(', ') || 'none'}`
+    }
+  }
+
+  await trx('vaults')
+    .where({ id: vaultId })
+    .update({ status: targetStatus, updated_at: new Date() })
+
+  return { success: true }
+};
+
 export const activateVault = (vaultId: string): TransitionResult => {
   const vault = findVault(vaultId);
   if (!vault) return { success: false, error: 'Vault not found' };
@@ -130,5 +161,51 @@ export const activateVault = (vaultId: string): TransitionResult => {
     return { success: false, error: `Cannot activate: status is '${vault.status}', expected 'draft'` };
   }
   vault.status = 'active';
+  return { success: true };
+};
+
+/**
+ * Places an `active` vault into `disputed`, blocking slash and claim until resolved.
+ * Only callable by an admin/guardian.
+ */
+export const disputeVault = (vaultId: string, requesterId: string, adminId: string): TransitionResult => {
+  if (requesterId !== adminId) {
+    return { success: false, error: 'Only an admin can place a vault into disputed state' };
+  }
+  const vault = findVault(vaultId);
+  if (!vault) return { success: false, error: 'Vault not found' };
+  const allowed = ALLOWED_TRANSITIONS[vault.status];
+  if (!allowed?.includes('disputed')) {
+    return { success: false, error: `Cannot dispute vault in status '${vault.status}'` };
+  }
+  vault.status = 'disputed';
+  return { success: true };
+};
+
+type DisputeResolution = 'active' | 'completed' | 'failed';
+
+/**
+ * Resolves a `disputed` vault back to `active`, or directly to `completed` / `failed`.
+ * Only callable by an admin/guardian.
+ */
+export const resolveDispute = (
+  vaultId: string,
+  requesterId: string,
+  adminId: string,
+  target: DisputeResolution,
+): TransitionResult => {
+  if (requesterId !== adminId) {
+    return { success: false, error: 'Only an admin can resolve a disputed vault' };
+  }
+  const vault = findVault(vaultId);
+  if (!vault) return { success: false, error: 'Vault not found' };
+  if (vault.status !== 'disputed') {
+    return { success: false, error: `Vault is not in disputed state (current: '${vault.status}')` };
+  }
+  const allowed = ALLOWED_TRANSITIONS['disputed'];
+  if (!allowed?.includes(target)) {
+    return { success: false, error: `Invalid dispute resolution target: '${target}'` };
+  }
+  vault.status = target;
   return { success: true };
 };

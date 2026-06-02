@@ -9,6 +9,8 @@ import {
   rotateApiKey,
 } from '../services/apiKeys.js'
 import { formatValidationError } from '../lib/validation.js'
+import { createAuditLog } from '../lib/audit-logs.js'
+import { ApiScope } from '../types/auth.js'
 
 export const apiKeysRouter = Router()
 
@@ -32,6 +34,20 @@ apiKeysRouter.post('/', apiKeyRateLimiter, async (req, res) => {
   const parseResult = createApiKeySchema.safeParse(req.body)
   if (!parseResult.success) {
     res.status(400).json(formatValidationError(parseResult.error))
+
+  // Validate scope names against the typed ApiScope enum
+  const validScopes = new Set(Object.values(ApiScope))
+  const invalidIndex = scopes.findIndex((s: string) => !validScopes.has(s))
+  if (invalidIndex !== -1) {
+    res.status(400).json({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request payload',
+        fields: [{ path: `scopes[${invalidIndex}]`, message: 'Invalid scope', code: 'invalid_value' }],
+      },
+    })
+    return
+  }
     return
   }
 
@@ -63,6 +79,14 @@ apiKeysRouter.post('/:id/rotate', apiKeyRateLimiter, async (req, res) => {
     return
   }
 
+  createAuditLog({
+    actor_user_id: userId,
+    action: 'api_key.rotated',
+    target_type: 'api_key',
+    target_id: rotated.record.id,
+    metadata: { label: rotated.record.label, scopes: rotated.record.scopes },
+  })
+
   const { keyHash: _keyHash, ...publicRecord } = rotated.record
   res.status(200).json({
     apiKey: rotated.apiKey,
@@ -78,6 +102,14 @@ apiKeysRouter.post('/:id/revoke', async (req, res) => {
     res.status(404).json({ error: 'API key not found.' })
     return
   }
+
+  createAuditLog({
+    actor_user_id: userId,
+    action: 'api_key.revoked',
+    target_type: 'api_key',
+    target_id: record.id,
+    metadata: { label: record.label, scopes: record.scopes },
+  })
 
   const { keyHash: _keyHash, ...publicRecord } = record
   res.json({ apiKeyMeta: publicRecord })
