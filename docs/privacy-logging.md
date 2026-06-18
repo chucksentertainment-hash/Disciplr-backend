@@ -232,6 +232,17 @@ export const myHandler = (req: Request, res: Response, next: NextFunction) => {
 
 All logs from the same request will automatically share the correlation ID.
 
+## Privacy Endpoint Security
+
+The `GET /api/privacy/export` and `DELETE /api/privacy/account` endpoints implement:
+
+- **Strict rate limiting** via `strictRateLimiter` (10 req/hour, configured in `src/middleware/rateLimiter.ts`)
+- **Creator ownership verification** — only the matching user or an admin may access/delete
+- **Enumeration-resistant responses** — generic 404 for both non-owned and non-existent creators
+- **Abuse monitoring** via `AbuseMonitor` (`src/services/abuse-monitor.ts`) — suspicious creator enumeration is recorded with `enumeration` category
+- **Audit logging** on erasure via `src/lib/audit-logs.ts` (action: `privacy.account_erasure`)
+- **Security metrics** surfaced through `GET /api/health/security` and `GET /api/admin/abuse/category-counts`
+
 ## Development vs Production
 
 Redaction runs in **all environments** (development, staging, production) to:
@@ -264,7 +275,7 @@ Coverage includes:
 ## Compliance
 
 This logging architecture supports compliance with:
-- **GDPR** — Redaction prevents PII leakage to log storage
+- **GDPR** — Redaction prevents PII leakage to log storage; right to access and erasure endpoints are rate-limited and ownership-gated
 - **HIPAA** — Sensitive fields are never stored in unencrypted logs
 - **SOC 2** — Structured logging enables audit trail generation
 - **PCI DSS** — Passwords, tokens, and API keys are redacted

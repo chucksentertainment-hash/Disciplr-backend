@@ -12,7 +12,7 @@ import { createExportRouter } from './routes/exports.js'
 import { configureExportJobRepository, createKnexExportJobRepository } from './services/exportQueue.js'
 import { db } from './db/index.js'
 import { transactionsRouter } from './routes/transactions.js'
-import { privacyRouter } from './routes/privacy.js'
+import { privacyRouter, privacyAbuseMonitor } from './routes/privacy.js'
 import { milestonesRouter } from './routes/milestones.js'
 import { orgVaultsRouter } from './routes/orgVaults.js'
 import { orgAnalyticsRouter } from './routes/orgAnalytics.js'
@@ -47,7 +47,7 @@ export function bootstrapApp(options: BootstrapOptions = {}) {
   app.use(inFlightMiddleware)
   app.use(withRequestPrisma)
 
-  app.use('/api/health', healthRateLimiter, createHealthRouter(jobSystem))
+  app.use('/api/health', healthRateLimiter, createHealthRouter(jobSystem, privacyAbuseMonitor))
   app.use('/api/jobs', createJobsRouter(jobSystem))
   app.use('/api/vaults', vaultsRateLimiter, vaultsRouter)
   app.use('/api/vaults/:vaultId/milestones', milestonesRouter)
