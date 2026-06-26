@@ -5,6 +5,13 @@ import { createAuditLog } from '../lib/audit-logs.js'
 import { IdempotencyService } from './idempotency.js'
 import { dispatchWebhookEvent, VAULT_LIFECYCLE_EVENTS } from './webhooks.js'
 
+/** Extract organization_id from the vault referenced in the event payload. */
+async function resolveOrganizationId(db: Knex, payload: VaultEventPayload): Promise<string> {
+  if (!payload.vaultId) return ''
+  const vault = await db('vaults').where({ id: payload.vaultId }).select('organization_id').first()
+  return (vault as { organization_id?: string } | undefined)?.organization_id ?? ''
+}
+
 /**
  * Error thrown when a dependency (e.g., a vault for a milestone) is not yet in the DB.
  * This should be treated as retryable for out-of-order event handling.
@@ -88,11 +95,14 @@ export class EventProcessor {
 
       // Fire-and-forget webhook dispatch for vault lifecycle events
       if (VAULT_LIFECYCLE_EVENTS.has(event.eventType)) {
+        const vaultPayload = event.payload as VaultEventPayload
+        const organizationId = await resolveOrganizationId(this.db, vaultPayload)
         dispatchWebhookEvent({
           eventId: event.eventId,
           eventType: event.eventType,
           timestamp: new Date().toISOString(),
           data: event.payload as unknown as Record<string, unknown>,
+          organizationId,
         }).catch((err) => {
           console.error('[EventProcessor] webhook dispatch error:', err?.message)
         })

@@ -1,8 +1,11 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { db } from '../db/knex.js'
+import { WebhookSubscriberRepository } from '../repositories/webhookSubscriberRepository.js'
 import { retryWithBackoff } from '../utils/retry.js'
 
 export interface WebhookSubscriber {
   id: string
+  organizationId: string
   url: string
   secret: string
   events: string[]
@@ -16,6 +19,7 @@ export interface WebhookDeliveryPayload {
   eventType: string
   timestamp: string
   data: Record<string, unknown>
+  organizationId: string
 }
 
 export interface WebhookDeliveryResult {
@@ -35,8 +39,7 @@ export const VAULT_LIFECYCLE_EVENTS = new Set([
   'vault_cancelled',
 ])
 
-// In-memory subscriber store (same pattern as apiKeys memory repository).
-const subscribers = new Map<string, WebhookSubscriber>()
+const repo = new WebhookSubscriberRepository(db)
 
 /**
  * Returns true when a URL is safe to deliver to.
@@ -62,7 +65,8 @@ export const isUrlAllowed = (
     return false
   }
 
-  const hostname = parsed.hostname
+  // Strip brackets from IPv6 addresses — Node >= 25 includes them in hostname.
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '')
 
   // Block loopback and common private ranges (SSRF mitigation)
   if (
@@ -104,31 +108,28 @@ export const verifySignature = (secret: string, body: string, signature: string)
   return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(signature, 'utf8'))
 }
 
-export const addSubscriber = (url: string, secret: string, events: string[]): WebhookSubscriber => {
+export const addSubscriber = async (
+  organizationId: string,
+  url: string,
+  secret: string,
+  events: string[],
+): Promise<WebhookSubscriber> => {
   if (!isUrlAllowed(url)) {
     throw new Error(`Webhook URL not permitted: ${url}`)
   }
 
-  const subscriber: WebhookSubscriber = {
-    id: randomUUID(),
-    url,
-    secret,
-    events: [...events],
-    active: true,
-    createdAt: new Date().toISOString(),
-  }
-
-  subscribers.set(subscriber.id, subscriber)
-  return subscriber
+  return repo.create({ organizationId, url, secret, events })
 }
 
-export const removeSubscriber = (id: string): boolean => subscribers.delete(id)
+export const removeSubscriber = async (id: string): Promise<boolean> => repo.remove(id)
 
-export const listSubscribers = (): WebhookSubscriber[] =>
-  Array.from(subscribers.values()).filter((s) => s.active)
+export const listSubscribers = async (organizationId: string): Promise<WebhookSubscriber[]> =>
+  repo.findByOrg(organizationId)
 
-/** Test helper – clears all subscribers. */
-export const resetSubscribers = (): void => subscribers.clear()
+/** Test helper – clears all subscribers from the database. */
+export const resetSubscribers = async (): Promise<void> => {
+  await db('webhook_subscribers').del()
+}
 
 const deliverOnce = async (
   subscriber: WebhookSubscriber,
@@ -166,16 +167,15 @@ const deliverOnce = async (
 }
 
 /**
- * Dispatches a webhook event to all eligible active subscribers with
- * exponential-backoff retry (max 3 attempts).  Failures are collected
- * rather than thrown so one bad subscriber cannot block the others.
+ * Dispatches a webhook event to all eligible active subscribers for the
+ * given organization with exponential-backoff retry (max 3 attempts).
+ * Failures are collected rather than thrown so one bad subscriber cannot
+ * block the others.
  */
 export const dispatchWebhookEvent = async (
   payload: WebhookDeliveryPayload,
 ): Promise<WebhookDeliveryResult[]> => {
-  const eligible = Array.from(subscribers.values()).filter(
-    (s) => s.active && (s.events.length === 0 || s.events.includes(payload.eventType)),
-  )
+  const eligible = await repo.findByEvent(payload.organizationId, payload.eventType)
 
   return Promise.all(
     eligible.map(async (subscriber): Promise<WebhookDeliveryResult> => {
