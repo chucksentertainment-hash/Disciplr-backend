@@ -99,6 +99,52 @@ The `Retry-After` value is the number of seconds remaining until the quota reset
 | -------------------------- | ------- | -------------------------------------- |
 | `EXPORT_DAILY_QUOTA_LIMIT` | `100`   | Max export requests per tenant per day |
 
+## Dead-Letter Queue (DLQ)
+
+When an export job exhausts all retry attempts and permanently fails, the ExportQueue moves it to an in-memory DLQ with a structured failure record.
+
+### DlqEntry structure
+
+| Field | Description |
+|-------|-------------|
+| `jobId` | Export job identifier |
+| `jobType` | `{scope}:{format}` (e.g. `vaults:csv`) |
+| `failureReason` | `serialization_error`, `data_fetch_error`, or `unknown_error` |
+| `errorMessage` | PII-sanitised error message |
+| `attemptCount` | Number of attempts made |
+| `failedAt` | ISO-8601 UTC timestamp |
+| `sanitisedContext` | Job metadata with `userId`/`targetUserId` replaced by opaque SHA-256 tokens |
+
+### Failure taxonomy
+
+- **`serialization_error`** — error during CSV or JSON serialisation
+- **`data_fetch_error`** — error while fetching export data from vault store or database
+- **`unknown_error`** — any other error (S3, repository, etc.)
+
+### DLQ operations (internal service methods)
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getDlqEntries()` | `DlqEntry[]` | Newest-first read-only snapshot |
+| `getDlqEntry(jobId)` | `DlqEntry \| undefined` | Lookup by job ID |
+| `getDlqDepth()` | `number` | Current entry count |
+| `requeueDlqEntry(jobId)` | `Promise<boolean>` | Remove from DLQ, reset job to `pending` with `attempts: 0` |
+| `discardDlqEntry(jobId)` | `boolean` | Permanently remove from DLQ |
+| `clearDlq()` | `number` | Remove all entries, returns count |
+
+### Configuration
+
+```ts
+configureDlq({ maxSize: 200, metricsHook: myHook })
+```
+
+- `maxSize` — maximum entries (default `100`); oldest entry evicted on overflow
+- `metricsHook` — optional callback `(event: DlqMetricsEvent) => void` invoked on add, requeue, discard, and clear; failures are caught and logged
+
+### PII safety
+
+`userId` and `targetUserId` are replaced with the first 8 characters of their SHA-256 hash via `maskPii` before storage or emission. Raw Stellar addresses, email addresses, and other PII fields listed in `PRIVACY.md` are stripped from `sanitisedContext` and `errorMessage`.
+
 ## CSV behavior
 
 - CSV output uses UTF-8 with BOM for spreadsheet compatibility.
