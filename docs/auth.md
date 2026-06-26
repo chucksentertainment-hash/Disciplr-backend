@@ -44,6 +44,7 @@ Endpoint: `POST /api/auth/register`
 - Password hashes are never returned in registration or login responses.
 - Role changes are persisted to the database and later read from the same `users` row.
 - Audit log metadata excludes email addresses and other request-body PII.
+- High-impact admin actions may require a fresh step-up assertion before proceeding.
 
 ## Role Definitions
 

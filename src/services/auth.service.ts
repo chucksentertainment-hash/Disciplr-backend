@@ -5,6 +5,9 @@ import { UserRole } from '../types/user.js'
 import { randomUUID } from 'node:crypto'
 import { recordSession, revokeAllUserSessions } from './session.js'
 
+const STEP_UP_TTL_SECONDS = 5 * 60
+const STEP_UP_NONCES = new Map<string, { userId: string; expiresAt: number; used: boolean }>()
+
 export class AuthService {
     static async register(input: RegisterInput) {
         try {
@@ -144,6 +147,60 @@ export class AuthService {
 
         // 2. Revoke all access token sessions
         await revokeAllUserSessions(userId)
+    }
+
+    static async issueStepUpChallenge(userId: string) {
+        const nonce = randomUUID()
+        const expiresAt = Date.now() + STEP_UP_TTL_SECONDS * 1000
+        STEP_UP_NONCES.set(nonce, { userId, expiresAt, used: false })
+
+        return {
+            nonce,
+            expiresAt,
+            ttlSeconds: STEP_UP_TTL_SECONDS,
+            challenge: 'webauthn-step-up',
+        }
+    }
+
+    static async recordStepUpAssertion(nonce: string, userId: string) {
+        const entry = STEP_UP_NONCES.get(nonce)
+        if (!entry || entry.used || entry.expiresAt < Date.now() || entry.userId !== userId) {
+            return false
+        }
+
+        entry.used = true
+        STEP_UP_NONCES.delete(nonce)
+        return true
+    }
+
+    static async validateStepUpSession(sessionId: string, maxAgeSeconds = STEP_UP_TTL_SECONDS) {
+        const entry = STEP_UP_NONCES.get(sessionId)
+        if (!entry || entry.used || entry.expiresAt < Date.now()) {
+            return null
+        }
+
+        const maxAgeMs = maxAgeSeconds * 1000
+        const isFresh = entry.expiresAt - Date.now() <= maxAgeMs
+        if (!isFresh) {
+            return null
+        }
+
+        entry.used = true
+        STEP_UP_NONCES.delete(sessionId)
+        return { userId: entry.userId, sessionId }
+    }
+
+    static async registerWebAuthnCredential(userId: string, credentialId: string, publicKey: string) {
+        await getPrisma().$executeRaw`
+            INSERT INTO "webauthn_credentials" ("user_id", "credential_id", "public_key")
+            VALUES (${userId}, ${credentialId}, ${publicKey})
+            ON CONFLICT ("credential_id") DO UPDATE SET
+                "public_key" = EXCLUDED."public_key",
+                "updated_at" = CURRENT_TIMESTAMP,
+                "last_used_at" = CURRENT_TIMESTAMP
+        `
+
+        return { userId, credentialId, publicKey }
     }
 }
 

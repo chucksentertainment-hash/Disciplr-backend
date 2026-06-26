@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { requireUserAuth } from '../middleware/auth.js'
+import { requireStepUp } from '../middleware/stepUp.js'
 import { apiKeyRateLimiter } from '../middleware/rateLimiter.js'
 import {
   createApiKey,
@@ -94,7 +95,7 @@ apiKeysRouter.post('/:id/rotate', apiKeyRateLimiter, async (req, res) => {
   })
 })
 
-apiKeysRouter.post('/:id/revoke', async (req, res) => {
+apiKeysRouter.post('/:id/revoke', requireStepUp(), async (req, res) => {
   const userId = req.authUser!.userId
   const record = await revokeApiKey(req.params.id, userId)
 
